@@ -1,0 +1,11 @@
+.git/**
+.devcontainer/**
+.vscode/**
+.gitignore
+src/**
+scripts/**
+spikes/**
+dist/*.test.js
+tsconfig.json
+package-lock.json
+**/*.vsix

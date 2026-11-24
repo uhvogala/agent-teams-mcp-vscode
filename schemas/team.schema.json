@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Teams configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["roles"],
+  "properties": {
+    "browserPreviewPorts": {
+      "description": "Obsolete. VS Code now controls browser access.",
+      "deprecationMessage": "Remove browserPreviewPorts. Agent Teams uses VS Code's native browser tools and does not apply a separate port list.",
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+      "maxItems": 10
+    },
+    "defaultRecipientRoleId": {
+      "description": "Optional ID from roles. Prefer this role for unaddressed human posts when it is a connected, unpaused room member.",
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "roles": {
+      "description": "Workspace roster. This replaces the default roster.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "description"],
+        "properties": {
+          "id": {
+            "description": "Unique, stable role ID used for assignments and rooms. Release an assigned role before changing its ID.",
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+          },
+          "name": {
+            "description": "Unique display name, other than You.",
+            "type": "string",
+            "pattern": "\\S",
+            "maxLength": 80
+          },
+          "description": {
+            "description": "Role responsibilities shown to the team and given to the worker.",
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "prompt": {
+            "description": "Optional instructions for this role's worker. Do not include secrets.",
+            "type": "string"
+          },
+          "launch": {
+            "description": "Use native Copilot permissions and the expanded Copilot tool catalog for this role. New sessions inherit omitted values from chat.defaultConfiguration; existing sessions retain their selections.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": ["interactive", "plan", "autopilot"],
+                "enumDescriptions": ["Step-by-step collaboration.", "Plan first, execute when ready.", "Work autonomously within permissions."]
+              },
+              "approvals": {
+                "type": "string",
+                "enum": ["manual", "assisted", "allowAll"],
+                "enumDescriptions": ["Manual permissions: ask when approval settings don't apply.", "Assisted permissions: evaluate risk before running tools.", "Allow all: run available tools without asking, subject to managed policy."]
+              }
+            }
+          },
+          "permissions": {
+            "description": "Override the role's default workspace permissions.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "read": { "type": "boolean", "description": "Use read-only repository tools when enabled for the workspace." },
+              "edit": { "type": "boolean", "description": "Request approval to edit files in the workspace." },
+              "run": { "type": "boolean", "description": "Request approval to run a command." },
+              "browser": { "type": "boolean", "description": "Use VS Code's native Integrated Browser tools when advertised by the editor. On by default for native launch profiles; off otherwise." },
+              "sandbox": { "type": "boolean", "description": "Override the terminal sandbox at launch. Native launch profiles inherit chat.agent.sandbox.enabled; other roles default to sandboxed. Unsandboxed commands can read and write files and use the network as the workspace host user." },
+              "promptForApproval": { "type": "boolean", "default": true, "description": "Legacy roles only; use launch.approvals for native approval controls. Set to false to approve allowed workspace edits or commands without dialogs." }
+            }
+          }
+        },
+        "if": { "required": ["launch"] },
+        "then": { "properties": { "permissions": { "not": { "required": ["promptForApproval"] } } } }
+      }
+    }
+  }
+}

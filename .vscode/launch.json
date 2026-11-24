@@ -1,0 +1,70 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Agent Teams",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "preLaunchTask": "Build Agent Teams"
+    },
+    {
+      "name": "Run Agent Teams with Native Chat",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--enable-proposed-api=uhvogala.agent-teams-mcp-vscode",
+        "${workspaceFolder}/.vscode/native-chat-probe.code-workspace"
+      ],
+      "preLaunchTask": "Build Agent Teams"
+    },
+    {
+      "name": "Run Native Chat Probe",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/spikes/native-chat",
+        "--enable-proposed-api=uhvogala.agent-teams-chat-probe",
+        "${workspaceFolder}/.vscode/native-chat-probe.code-workspace"
+      ],
+      "preLaunchTask": "Build Agent Teams"
+    },
+    {
+      "name": "Run Native Chat Approval Probe",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/spikes/native-chat",
+        "--enable-proposed-api=uhvogala.agent-teams-chat-probe",
+        "${workspaceFolder}/.vscode/native-chat-probe.code-workspace"
+      ],
+      "env": { "AGENT_TEAMS_PROBE_APPROVAL": "1" },
+      "preLaunchTask": "Build Agent Teams"
+    },
+    {
+      "name": "Run Native Chat Join Probe",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/spikes/native-chat",
+        "--enable-proposed-api=uhvogala.agent-teams-chat-probe",
+        "${workspaceFolder}/.vscode/native-chat-probe.code-workspace"
+      ],
+      "env": { "AGENT_TEAMS_PROBE_JOIN": "1" },
+      "preLaunchTask": "Build Agent Teams"
+    },
+    {
+      "name": "Run Live Native Chat Join Probe",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/spikes/native-chat",
+        "--enable-proposed-api=uhvogala.agent-teams-chat-probe",
+        "${workspaceFolder}/.vscode/native-chat-probe.code-workspace"
+      ],
+      "env": { "AGENT_TEAMS_PROBE_JOIN": "1", "AGENT_TEAMS_PROBE_LIVE": "1" },
+      "preLaunchTask": "Build Agent Teams"
+    }
+  ]
+}

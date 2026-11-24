@@ -1,0 +1,7 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "Build Agent Teams", "type": "npm", "script": "build", "group": "build", "problemMatcher": "$tsc" },
+    { "label": "Test Agent Teams", "type": "npm", "script": "test", "group": "test", "problemMatcher": "$tsc" }
+  ]
+}

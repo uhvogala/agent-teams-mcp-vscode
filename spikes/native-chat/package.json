@@ -1,0 +1,25 @@
+{
+  "name": "agent-teams-chat-probe",
+  "displayName": "Agent Teams Chat Probe",
+  "publisher": "uhvogala",
+  "version": "0.0.1",
+  "private": true,
+  "engines": { "vscode": "^1.148.0" },
+  "main": "./extension.cjs",
+  "extensionKind": ["workspace"],
+  "enabledApiProposals": ["remoteAgentHost", "tunnels"],
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": false },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      { "command": "agentTeamsChatProbe.approvalStatus", "title": "Agent Teams Probe: Check Approval Marker" },
+      { "command": "agentTeamsChatProbe.wake", "title": "Agent Teams Probe: Wake Worker" },
+      { "command": "agentTeamsChatProbe.queueStopDelivery", "title": "Agent Teams Probe: Queue Delivery While Busy" },
+      { "command": "agentTeamsChatProbe.restartHost", "title": "Agent Teams Probe: Restart Host" },
+      { "command": "agentTeamsChatProbe.resumeStopDelivery", "title": "Agent Teams Probe: Resume After Stop" }
+    ]
+  }
+}
