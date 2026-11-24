@@ -303,7 +303,9 @@ test('the real SDK and MCP relay notifications and restore previously published 
         } else if (after.length <= 3) {
           const continuation = JSON.parse(after.at(-1)?.content ?? '{}');
           if (continuation.nextAfterSeq !== null) {
-            tool = 'read_thread'; args = { anchorId: page.anchorId, afterSeq: continuation.nextAfterSeq };
+            tool = 'read_thread'; args = {
+              anchorId: page.anchorId, afterSeq: continuation.nextAfterSeq, throughSeq: continuation.throughSeq,
+            };
           } else {
             continuedThread = continuation.messages.some((post: { body: string }) => post.body === 'Last quiet branch');
             tool = 'ack_message'; args = { id };

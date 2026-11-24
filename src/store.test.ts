@@ -318,17 +318,26 @@ test('thread continuation has a bounded initial batch and rechecks authorization
     const read: string[] = [];
     const cursor = next.nextAfterSeq;
     assert(cursor !== null);
+    const throughSeq = next.throughSeq;
+    const late = store.post(room, 'You', 'New sibling between pages', [], false, undefined, root.id);
+    assert.throws(() => store.readThread(builder, anchor.id, cursor), /Continue with both/);
     while (true) {
       assert(next.messages.length <= 20);
+      assert.equal(next.throughSeq, throughSeq);
       read.push(...next.messages.map(post => post.id));
       if (next.nextAfterSeq === null) break;
-      next = store.readThread(builder, thread.anchorId, next.nextAfterSeq);
+      next = store.readThread(builder, thread.anchorId, next.nextAfterSeq, throughSeq);
     }
     assert.deepEqual(read, posts);
-    assert.throws(() => store.readThread(builder, root.id, cursor), /unavailable/);
-    assert.throws(() => store.readThread(lead, anchor.id, cursor), /unavailable/);
+    const fresh = store.readThread(builder, anchor.id, 0);
+    assert(fresh.throughSeq > throughSeq);
+    assert(fresh.nextAfterSeq !== null);
+    const later = store.readThread(builder, anchor.id, fresh.nextAfterSeq, fresh.throughSeq);
+    assert.equal(later.messages.at(-1)?.id, late.id);
+    assert.throws(() => store.readThread(builder, root.id, cursor, throughSeq), /unavailable/);
+    assert.throws(() => store.readThread(lead, anchor.id, cursor, throughSeq), /unavailable/);
     store.closeRoom(room);
-    assert.throws(() => store.readThread(builder, anchor.id, cursor), /unavailable/);
+    assert.throws(() => store.readThread(builder, anchor.id, cursor, throughSeq), /unavailable/);
     store.release('builder', builder);
     const replacement = store.reserve('builder');
     store.assign('builder', replacement);
@@ -363,6 +372,44 @@ test('transcript distinguishes queued wakes, claimed unacknowledged wakes, and i
   } finally { store.close(); }
 });
 
+test('three-role reply handoffs can exhaust a wake chain without mentions or duplicate deliveries', () => {
+  const store = new TeamStore(':memory:');
+  try {
+    const workers = ['lead', 'builder', 'reviewer'].map(roleId => {
+      const sessionId = store.reserve(roleId);
+      store.assign(roleId, sessionId);
+      return { roleId, sessionId };
+    });
+    const root = store.post('team', 'You', '@all Start the handoff', [], true);
+    assert.equal(root.wakeSessions.length, 3);
+    let parent = root.id;
+    let scheduled = root.wakeSessions.length;
+    let nextWorkers = root.wakeSessions;
+    for (let index = 0; index < 16; index++) {
+      const preferred = workers[index % workers.length];
+      const worker = nextWorkers.includes(preferred.sessionId)
+        ? preferred : workers.find(candidate => candidate.sessionId === nextWorkers[0]);
+      assert(worker, 'a recipient with a scheduled wake must be available to reply');
+      const wake = store.claimWake(worker.sessionId).find(message => message.id === parent);
+      assert.equal(wake?.chain, root.id);
+      const quiet = store.post('team', worker.roleId, 'Quiet status update', [], wake.chain, worker);
+      assert.deepEqual(quiet.sessions, []);
+      const reply = store.post('team', worker.roleId, 'Passing the handoff along', [], wake.chain, worker, parent);
+      assert.deepEqual(new Set(reply.sessions), new Set(workers.filter(peer => peer !== worker).map(peer => peer.sessionId)));
+      assert.equal(reply.wakeSessions.length, index < 14 ? 2 : index === 14 ? 1 : 0);
+      assert.equal(reply.wakeLimited, index >= 14);
+      scheduled += reply.wakeSessions.length;
+      nextWorkers = reply.wakeSessions;
+      parent = reply.id;
+    }
+    assert.equal(scheduled, 32);
+    for (const worker of [workers[0], workers[2]]) {
+      assert.deepEqual(store.readInbox(worker.sessionId, [parent]).messages.map(({ id }) => id), [parent]);
+      assert.equal(store.isAcknowledged(worker.sessionId, parent), false);
+    }
+  } finally { store.close(); }
+});
+
 test('a shared wake chain exhausts its budget across branches and restarts without dropping delivery', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-teams-wake-chain-'));
   const file = join(dir, 'team.sqlite');
@@ -376,14 +423,14 @@ test('a shared wake chain exhausts its budget across branches and restarts witho
     store.assign('reviewer', reviewer);
     const root = store.post('team', 'You', '@lead', [], true);
     assert.deepEqual(store.claimWake(lead).map(wake => [wake.id, wake.chain]), [[root.id, root.id]]);
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 15; i++) {
       const post = store.post('team', 'Lead', '@all Check in', [], root.id, { roleId: 'lead', sessionId: lead });
       assert.equal(post.wakeSessions.length, 2);
     }
-    const branch = store.claimWake(builder);
-    assert.equal(branch.length, 7);
+    const branch = [...store.claimWake(builder), ...store.claimWake(builder)];
+    assert.equal(branch.length, 15);
     const independent = store.post('team', 'You', '@reviewer Different task', [], true);
-    assert.deepEqual(store.claimWake(reviewer).map(wake => wake.chain), Array(7).fill(root.id));
+    assert.deepEqual([...store.claimWake(reviewer), ...store.claimWake(reviewer)].map(wake => wake.chain), Array(15).fill(root.id));
     assert.deepEqual(store.claimWake(reviewer).map(wake => [wake.id, wake.chain]), [[independent.id, independent.id]]);
     const reply = store.post('team', 'Builder', 'Last wake', ['lead', 'reviewer'], branch[0].chain, { roleId: 'builder', sessionId: builder }, root.id);
     assert.deepEqual(reply.wakeSessions, [lead]);

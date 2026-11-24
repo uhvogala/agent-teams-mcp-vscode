@@ -17,7 +17,7 @@ function toMessage({ parentId, parentAuthor, parentPreview, ...message }: Messag
   return parentId !== null && parentAuthor !== null && parentPreview !== null
     ? { ...message, replyTo: { id: parentId, author: parentAuthor, preview: parentPreview } } : message;
 }
-const maxChainWakes = 16;
+const maxChainWakes = 32;
 const inboxLimit = 20;
 const threadContextLimit = 20;
 export class TeamStore {
@@ -294,14 +294,23 @@ export class TeamStore {
     });
   }
 
-  readThread(sessionId: string, anchorId: string, afterSeq: number) {
-    const anchor = this.db.prepare(`SELECT m.roomId FROM delivery d JOIN messages m ON m.id=d.messageId
+  readThread(sessionId: string, anchorId: string, afterSeq: number, throughSeq?: number) {
+    const anchor = this.db.prepare(`SELECT m.roomId, m.seq,
+      (SELECT max(seq) FROM messages WHERE roomId=m.roomId) AS upperSeq
+      FROM delivery d JOIN messages m ON m.id=d.messageId
       JOIN rooms r ON r.id=m.roomId AND r.closed=0
       JOIN roles worker ON worker.sessionId=d.sessionId AND worker.phase='assigned' AND worker.paused=0
       JOIN members member ON member.roomId=m.roomId AND member.roleId=worker.id
       WHERE d.sessionId=? AND d.messageId=?`).get(sessionId, anchorId);
-    if (typeof anchor?.roomId !== 'string') throw new Error('Thread context is unavailable for this delivery.');
-    return this.threadPage(this.threadRoot(anchorId, anchor.roomId), anchor.roomId, anchorId, afterSeq, threadContextLimit);
+    if (typeof anchor?.roomId !== 'string' || typeof anchor.upperSeq !== 'number' || typeof anchor.seq !== 'number') {
+      throw new Error('Thread context is unavailable for this delivery.');
+    }
+    if (afterSeq > 0 ? throughSeq === undefined || throughSeq <= afterSeq ||
+        throughSeq < anchor.seq || throughSeq > anchor.upperSeq : throughSeq !== undefined) {
+      throw new Error('Continue with both nextAfterSeq and throughSeq from the previous page, or omit both to start a fresh read.');
+    }
+    return this.threadPage(this.threadRoot(anchorId, anchor.roomId), anchor.roomId, anchorId,
+      afterSeq, throughSeq ?? anchor.upperSeq);
   }
 
   private threadRoot(anchorId: string, roomId: string) {
@@ -326,19 +335,19 @@ export class TeamStore {
     ORDER BY m.seq`).all(roomId, JSON.stringify(parentIds), roomId, limit + 1) as MessageRow[];
   }
 
-  private threadPage(rootId: string, roomId: string, anchorId: string, afterSeq: number, limit: number) {
+  private threadPage(rootId: string, roomId: string, anchorId: string, afterSeq: number, throughSeq: number) {
     const rows = this.db.prepare(`WITH RECURSIVE thread(id,seq) AS (
       SELECT id,seq FROM messages WHERE id=? AND roomId=?
       UNION ALL
       SELECT child.id,child.seq FROM thread t JOIN message_links edge ON edge.replyTo=t.id
-      JOIN messages child ON child.id=edge.messageId AND child.roomId=? AND child.seq>t.seq
+      JOIN messages child ON child.id=edge.messageId AND child.roomId=? AND child.seq>t.seq AND child.seq<=?
     ), page AS (SELECT id FROM thread WHERE seq>? ORDER BY seq LIMIT ?)
     SELECT ${replyColumns} FROM page JOIN messages m ON m.id=page.id ${replyJoins}
-    ORDER BY m.seq`).all(rootId, roomId, roomId, afterSeq, limit + 1) as MessageRow[];
-    const messages = rows.slice(0, limit).map(toMessage);
+    ORDER BY m.seq`).all(rootId, roomId, roomId, throughSeq, afterSeq, threadContextLimit + 1) as MessageRow[];
+    const messages = rows.slice(0, threadContextLimit).map(toMessage);
     return {
-      rootId, roomId, anchorId, messages,
-      nextAfterSeq: rows.length > limit ? messages[messages.length - 1].seq : null,
+      rootId, roomId, anchorId, messages, throughSeq,
+      nextAfterSeq: rows.length > threadContextLimit ? messages[messages.length - 1].seq : null,
     };
   }
 
