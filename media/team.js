@@ -77,6 +77,21 @@ function roleCard(role) {
   return card;
 }
 
+function showRestoreAction(needsRestore) {
+  const action = byId('restore');
+  const recovery = byId('recovery-action');
+  const destination = needsRestore ? recovery : byId('roster-actions');
+  if (action.parentElement === destination) return;
+  const focused = document.activeElement === action;
+  recovery.hidden = !needsRestore;
+  destination.prepend(action);
+  action.classList.toggle('quiet', !needsRestore);
+  if (focused) {
+    const roster = byId('roster');
+    (needsRestore || roster.open ? action : roster.querySelector('summary')).focus({ preventScroll: true });
+  }
+}
+
 function roomRow(room) {
   const li = node('li');
   const row = button(undefined, 'select', { roomId: room.id }, 'room-row');
@@ -233,6 +248,7 @@ window.addEventListener('message', ({ data }) => {
   if (data.unavailable) return;
 
   roles = data.roles;
+  showRestoreAction(data.needsRestore);
   const changedLogin = login !== data.login;
   login = data.login;
   byId('roster-count').textContent = `${roles.filter(role => ['Idle', 'Busy'].includes(role.activity)).length}/${roles.length} active`;

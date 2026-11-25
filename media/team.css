@@ -28,6 +28,7 @@ button:disabled { opacity: .55; cursor: default; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 #status { margin: 12px; }
 #overview { padding: 8px 10px 12px; }
+#recovery-action { margin-bottom: 6px; }
 details > summary {
   display: flex;
   align-items: center;

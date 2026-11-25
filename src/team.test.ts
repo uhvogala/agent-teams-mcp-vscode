@@ -156,6 +156,22 @@ test('verified sign-in uses the editor account label when SDK login is missing w
   }
 });
 
+test('the panel recovery state excludes paused and vacant roles', async () => {
+  const store = new TeamStore(':memory:', defaultRoles);
+  const team = new Team(store, '/fixture', '/fixture-runtime', () => ({ projectSummary: '' }), () => {}, () => {});
+  try {
+    assert.equal(team.needsRestore, false);
+    const sessionId = store.reserve('builder');
+    store.assign('builder', sessionId);
+    assert.equal(team.needsRestore, true);
+    await team.pause('builder');
+    assert.equal(team.needsRestore, false);
+  } finally {
+    await team.close();
+    store.close();
+  }
+});
+
 test('unaddressed human posts select one available room member and preserve explicit delivery', async t => {
   const store = new TeamStore(':memory:', [
     { id: 'release-qa', name: 'Release QA', description: 'Check releases.' },
@@ -568,11 +584,14 @@ test('the real SDK and MCP relay notifications and restore previously published 
     team = makeTeam(store);
     assert.equal(activity('lead'), 'Needs recovery');
     assert.equal(activity('builder'), 'Paused');
+    assert.equal(team.needsRestore, true, 'the panel should surface recovery on reload');
     await assert.rejects(team.restore(async () => { throw new Error('test port conflict'); }), /test port conflict/);
     assert.equal(activity('lead'), 'Idle', 'a desktop registration failure does not undo worker recovery');
     assert.equal(activity('reviewer'), 'Idle');
+    assert.equal(team.needsRestore, true, 'the panel should retain Restore while native recovery is pending');
     const recoveredHost = await team.openNativeHost();
     await team.restore(() => Promise.resolve(recoveredHost));
+    assert.equal(team.needsRestore, false, 'successful restore should return the action to the roster');
     assert.equal(activity('builder'), 'Paused');
     assert.equal(store.isAcknowledged(builder, next.id), false);
     const recovered = await connect(recoveredHost);

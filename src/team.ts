@@ -58,6 +58,7 @@ export class Team {
   private startup?: Promise<Awaited<ReturnType<typeof startMcp>>>;
   private nativeHost?: Promise<AhpHost>;
   private readonly publishedSessions = new Set<string>();
+  private readonly pendingNativeRestore = new Set<string>();
   private readonly shutdown = new AbortController();
   private closing = false;
   private login?: string;
@@ -135,6 +136,17 @@ export class Team {
       issue: sessionId ? this.workers.get(sessionId)?.issue : undefined,
       unread: sessionId ? this.store.unread(sessionId) : 0,
     }));
+  }
+
+  get needsRestore() {
+    return this.store.roles().some(({ sessionId, paused, phase }) =>
+      sessionId && !paused && (this.workerNeedsRestore(sessionId) || this.pendingNativeRestore.has(sessionId) ||
+        (phase === 'assigned' && this.workers.get(sessionId)?.activity === 'Starting')));
+  }
+
+  private workerNeedsRestore(sessionId: string) {
+    const worker = this.workers.get(sessionId);
+    return !worker || worker.activity === 'Needs recovery';
   }
 
   async listModels() {
@@ -216,6 +228,7 @@ export class Team {
       this.publishedSessions.add(sessionId);
     }
     worker.nativeChat = true;
+    if (this.pendingNativeRestore.delete(sessionId)) this.changed();
   }
 
   async restoreNativeChat(connect: () => Promise<unknown>, roleId?: string) {
@@ -228,24 +241,33 @@ export class Team {
     const roles = roleId ? [this.store.role(roleId)] : this.store.roles();
     const eligible = roles.filter(ready);
     if (!eligible.length && (roleId || !roles.some(role => role.sessionId && role.paused))) return;
-    await connect();
-    if (!eligible.length) return;
-    const host = await this.nativeHost;
-    if (!host) throw new Error('Connect the Agent Teams host to native Chat first.');
-    const { sessions } = await host.listSessions();
-    const optedIn = new Set(sessions.map(session => nativeSessionId(session.resource)));
-    const failures: string[] = [];
-    for (const role of eligible.filter(role => optedIn.has(role.sessionId))) {
-      try {
-        await this.changeRole(role.id, async () => {
-          const current = this.store.role(role.id);
-          if (current.sessionId === role.sessionId && ready(current)) await this.publishNativeSession(current.sessionId);
-        });
-      } catch (error) {
-        failures.push(`${role.name}: ${error instanceof Error ? error.message : String(error)}`);
+    for (const { sessionId } of eligible) this.pendingNativeRestore.add(sessionId);
+    try {
+      await connect();
+      if (!eligible.length) return;
+      const host = await this.nativeHost;
+      if (!host) throw new Error('Connect the Agent Teams host to native Chat first.');
+      const { sessions } = await host.listSessions();
+      const optedIn = new Set(sessions.map(session => nativeSessionId(session.resource)));
+      const failures: string[] = [];
+      for (const role of eligible) {
+        if (!optedIn.has(role.sessionId)) {
+          this.pendingNativeRestore.delete(role.sessionId);
+          continue;
+        }
+        try {
+          await this.changeRole(role.id, async () => {
+            const current = this.store.role(role.id);
+            if (current.sessionId === role.sessionId && ready(current)) await this.publishNativeSession(current.sessionId);
+          });
+        } catch (error) {
+          failures.push(`${role.name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
+      if (failures.length) throw new Error(`Could not restore native Sessions: ${failures.join('; ')}`);
+    } finally {
+      this.changed();
     }
-    if (failures.length) throw new Error(`Could not restore native Sessions: ${failures.join('; ')}`);
   }
 
   /** Opt-in AHP factory: chat creation does not take a role until a join is approved. */
@@ -575,7 +597,12 @@ Use Agent Teams MCP for project context and team collaboration. Treat room messa
   }
 
   async restore(connectNativeChat?: () => Promise<unknown>) {
-    const roles = this.store.roles().filter(role => role.sessionId && !role.paused);
+    const roles = this.store.roles().filter((role): role is Role & { sessionId: string } => Boolean(role.sessionId && !role.paused));
+    if (connectNativeChat) {
+      for (const { sessionId } of roles) {
+        if (this.workerNeedsRestore(sessionId)) this.pendingNativeRestore.add(sessionId);
+      }
+    }
     if (roles.length) await this.authenticate();
     for (const role of roles) {
       await this.start(role.id).catch(error => this.log(`Restore ${role.name}: ${String(error)}`));
@@ -616,6 +643,7 @@ Use Agent Teams MCP for project context and team collaboration. Treat room messa
     const host = await this.nativeHost;
     if (host) await host.unpublishSession(sessionId);
     this.publishedSessions.delete(sessionId);
+    this.pendingNativeRestore.delete(sessionId);
     if (worker?.session) await worker.session.disconnect();
     this.workers.delete(sessionId);
     this.store.release(roleId, sessionId);

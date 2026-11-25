@@ -47,7 +47,8 @@ export async function activate(context: vscode.ExtensionContext) {
     const rooms = store?.roomSummaries() ?? [];
     const active = rooms.find(room => room.id === selectedRoom);
     void panel.webview.postMessage({
-      type: 'state', roles, rooms, active, unavailable, login: team?.signedInLogin ?? editorAccountLabel,
+      type: 'state', roles, rooms, active, unavailable, needsRestore: team?.needsRestore ?? false,
+      login: team?.signedInLogin ?? editorAccountLabel,
       members: active ? store?.roomMembers(active.id) : [],
       transcript: active ? store?.transcript(active.id).map(message => ({
         ...message, bodyHtml: renderMessageMarkdown(message.body),
@@ -249,10 +250,11 @@ export async function activate(context: vscode.ExtensionContext) {
 <p id="status" role="status">Loading team...</p>
 <main id="team" hidden>
   <section id="overview" aria-label="Team overview">
+    <div id="recovery-action" hidden></div>
     <details id="roster">
       <summary><span>Team roster</span><span class="muted" id="roster-count"></span></summary>
       <div id="roles"></div>
-      <div class="controls roster-actions"><button id="restore" class="quiet" type="button">Restore team</button><button id="configure" class="quiet" type="button">Configure</button></div>
+      <div id="roster-actions" class="controls roster-actions"><button id="restore" class="quiet" type="button">Restore team</button><button id="configure" class="quiet" type="button">Configure</button></div>
     </details>
     <button id="new" class="new-room" type="button" aria-controls="new-room" aria-expanded="false"><span aria-hidden="true">+</span> New room</button>
     <form id="new-room" hidden>
