@@ -23,6 +23,10 @@ const fingerprints = new Map();
 let activeRoom;
 let replyTo;
 let sending;
+let restoreRequested = false;
+let restoring = false;
+let needsRestore = false;
+let restoreHadFocus = false;
 let shownMessages = [];
 let roles = [];
 let login;
@@ -77,19 +81,28 @@ function roleCard(role) {
   return card;
 }
 
-function showRestoreAction(needsRestore) {
+function syncRestoreAction() {
+  const busy = restoreRequested || restoring;
   const action = byId('restore');
   const recovery = byId('recovery-action');
-  const destination = needsRestore ? recovery : byId('roster-actions');
-  if (action.parentElement === destination) return;
-  const focused = document.activeElement === action;
-  recovery.hidden = !needsRestore;
-  destination.prepend(action);
-  action.classList.toggle('quiet', !needsRestore);
-  if (focused) {
-    const roster = byId('roster');
-    (needsRestore || roster.open ? action : roster.querySelector('summary')).focus({ preventScroll: true });
+  const prominent = needsRestore || (busy && action.parentElement === recovery);
+  const destination = prominent ? recovery : byId('roster-actions');
+  if (busy && !action.disabled) restoreHadFocus = document.activeElement === action;
+  const focused = document.activeElement === action || (restoreHadFocus && document.activeElement === document.body);
+  const moved = action.parentElement !== destination;
+  const settled = action.disabled && !busy;
+  action.disabled = busy;
+  action.textContent = busy ? 'Restoring…' : 'Restore team';
+  if (moved) {
+    recovery.hidden = !prominent;
+    destination.prepend(action);
+    action.classList.toggle('quiet', !prominent);
   }
+  if (!busy && focused && (moved || settled) && !byId('overview').hidden) {
+    const roster = byId('roster');
+    (prominent || roster.open ? action : roster.querySelector('summary')).focus({ preventScroll: true });
+  }
+  if (!busy) restoreHadFocus = false;
 }
 
 function roomRow(room) {
@@ -220,6 +233,11 @@ function syncSend() {
 }
 
 window.addEventListener('message', ({ data }) => {
+  if (data.type === 'restoreFinished') {
+    restoreRequested = false;
+    syncRestoreAction();
+    return;
+  }
   if (data.type === 'sent' || data.type === 'sendFailed') {
     if (data.type === 'sent') {
       if (activeRoom?.id === data.roomId) {
@@ -248,7 +266,9 @@ window.addEventListener('message', ({ data }) => {
   if (data.unavailable) return;
 
   roles = data.roles;
-  showRestoreAction(data.needsRestore);
+  needsRestore = data.needsRestore;
+  restoring = data.restoring;
+  syncRestoreAction();
   const changedLogin = login !== data.login;
   login = data.login;
   byId('roster-count').textContent = `${roles.filter(role => ['Idle', 'Busy'].includes(role.activity)).length}/${roles.length} active`;
@@ -292,7 +312,12 @@ window.addEventListener('message', ({ data }) => {
   if (changedRoom || (activeRoom.closed && !previous?.closed)) byId('room-title').focus({ preventScroll: true });
 });
 
-byId('restore').onclick = () => post('restore');
+byId('restore').onclick = () => {
+  if (restoreRequested || restoring) return;
+  restoreRequested = true;
+  syncRestoreAction();
+  post('restore');
+};
 byId('configure').onclick = () => post('configure');
 byId('back').onclick = () => post('back');
 byId('cancel-reply').onclick = () => {

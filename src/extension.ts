@@ -40,6 +40,7 @@ export async function activate(context: vscode.ExtensionContext) {
   let panel: vscode.WebviewView | undefined;
   let selectedRoom: string | undefined;
   let editorAccountLabel: string | undefined;
+  let restoring: Promise<void> | undefined;
   const authorization = editorGitHubAuthorization(vscode);
   const render = () => {
     if (!panel) return;
@@ -48,6 +49,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const active = rooms.find(room => room.id === selectedRoom);
     void panel.webview.postMessage({
       type: 'state', roles, rooms, active, unavailable, needsRestore: team?.needsRestore ?? false,
+      restoring: Boolean(restoring),
       login: team?.signedInLogin ?? editorAccountLabel,
       members: active ? store?.roomMembers(active.id) : [],
       transcript: active ? store?.transcript(active.id).map(message => ({
@@ -163,7 +165,17 @@ export async function activate(context: vscode.ExtensionContext) {
     await service.start(roleId, selection.model);
     if (context.workspaceState.get<string>(addressKey)) await service.restoreNativeChat(ensureNativeChat, roleId);
   };
-  const restore = () => requireTeam().restore(context.workspaceState.get<string>(addressKey) ? ensureNativeChat : undefined);
+  const restore = () => {
+    if (restoring) return restoring;
+    restoring = Promise.resolve().then(() =>
+      requireTeam().restore(context.workspaceState.get<string>(addressKey) ? ensureNativeChat : undefined),
+    ).catch(report).finally(() => {
+      restoring = undefined;
+      render();
+    });
+    render();
+    return restoring;
+  };
   const chatResult = (result: object) => new vscode.LanguageModelToolResult([
     new vscode.LanguageModelTextPart(JSON.stringify(result)),
   ]);
@@ -222,9 +234,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (role) await start(role.id);
       } catch (error) { report(error); }
     }),
-    vscode.commands.registerCommand('agentTeams.restore', async () => {
-      try { await restore(); } catch (error) { report(error); }
-    }),
+    vscode.commands.registerCommand('agentTeams.restore', restore),
     vscode.commands.registerCommand('agentTeams.startInNativeChat', async () => {
       try {
         const service = requireTeam();
@@ -303,6 +313,11 @@ export async function activate(context: vscode.ExtensionContext) {
               }
               return;
             }
+            if (data.action === 'restore') {
+              try { await restore(); }
+              finally { void view.webview.postMessage({ type: 'restoreFinished' }); }
+              return;
+            }
             const service = requireTeam();
             switch (data.action) {
               case 'start': await start(data.roleId); break;
@@ -313,7 +328,6 @@ export async function activate(context: vscode.ExtensionContext) {
                 break;
               }
               case 'retry': service.retry(data.roleId); break;
-              case 'restore': await restore(); break;
               case 'configure': await vscode.commands.executeCommand('agentTeams.editConfiguration'); break;
               case 'back': selectedRoom = undefined; break;
               case 'select':

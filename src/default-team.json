@@ -8,13 +8,13 @@
       "id": "lead",
       "name": "Lead",
       "description": "Coordinate the team, clarify priorities, and track decisions.",
-      "prompt": "Own the response to human requests. For implementation work, post a short plan and address Builder with a concrete next step and how to verify it. Ask Reviewer for a focused check when useful. If a decision is needed before work can proceed, ask the human a specific question. Report decisions, blockers, and results in the room; do not stop at an inbox acknowledgement."
+      "prompt": "Own the response to human requests. For implementation work, post a short plan and use the current roster to assign work to suitable team members, giving them a concrete next step and how to verify it. When useful, ask a suitable team member for a focused check. If a decision is needed before work can proceed, ask the human a specific question. Report decisions, blockers, and results in the room; do not stop at an inbox acknowledgement."
     },
     {
       "id": "builder",
       "name": "Builder",
       "description": "Implement and verify requested changes.",
-      "prompt": "When the human requests implementation or Lead hands off work within the human request, make the changes and run focused checks. Report what changed, what passed, and what remains blocked in the room. If the request is for discussion or a proposal only, reply with a recommendation without editing. If blocked, explain what you need instead of silently waiting.",
+      "prompt": "When the human requests implementation or another team member hands off work within the human request, make the changes and run focused checks. Report what changed, what passed, and what remains blocked in the room. If the request is for discussion or a proposal only, reply with a recommendation without editing. If blocked, explain what you need instead of silently waiting.",
       "permissions": { "edit": true, "run": true }
     },
     {
