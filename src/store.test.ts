@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { TeamStore } from './store';
-import { defaultTeamConfig, resolveRoleLaunch } from './team-config';
+import { defaultTeamConfig, loadTeamConfig, resolveRoleLaunch } from './team-config';
 
 test('workspace definitions replace vacant defaults and preserve state for stable role IDs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-teams-config-'));
