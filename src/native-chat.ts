@@ -4,7 +4,7 @@ import type { Team } from './team';
 
 type Registration = { name: string; address: string; connectionToken: string };
 type Tunnel = { localAddress: string | { host: string; port: number }; dispose(): void | Thenable<void> };
-const launchFlag = '--enable-proposed-api=uhvogala.agent-teams-mcp-vscode';
+const launchFlag = '--enable-proposed-api=aitostack.agent-teams-mcp-vscode';
 
 function isMissingProposal(error: unknown, proposal: 'tunnels' | 'remoteAgentHost') {
   return error instanceof Error && error.message.includes(`CANNOT use API proposal: ${proposal}.`);

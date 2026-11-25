@@ -4,11 +4,13 @@ Agent Teams gives a trusted workspace a Team panel, a shared transcript, and rol
 
 ## Install and try it
 
-1. In VS Code 1.146 or later, run **Extensions: Install from VSIX…** and select the package for the machine that runs your workspace extension host. For a remote folder, this means the remote machine, not your desktop. The `linux-*` builds bundle the glibc runtime used by distributions such as Debian and Ubuntu; they are not Alpine builds.
+1. Download the matching `.vsix` from [GitHub Releases](https://github.com/uhvogala/agent-teams-mcp-vscode/releases) or extract it from the matching artifact of a successful [Build VSIX](https://github.com/uhvogala/agent-teams-mcp-vscode/actions/workflows/build-vsix.yml) run. In VS Code 1.148.0 or later (1.x), run **Extensions: Install from VSIX…** and select the package for the machine that runs your workspace extension host. For a remote folder, this means the remote machine, not your desktop. The `linux-*` builds bundle the glibc runtime used by distributions such as Debian and Ubuntu; they are not Alpine builds.
 2. Open a trusted folder and open **Agent Teams** in the Activity Bar. Expand **Team roster** and click **Start** for Lead and Builder. Agent Teams follows Copilot Chat's configured sign-in provider. Approve the VS Code account request if prompted; the pending starts then continue. To sign in without starting a worker, run **Agent Teams: Sign In to Copilot**.
 3. Wait for Lead and Builder to show **Idle** after posting their greetings. Agent Teams announces each new assignment in the Team room and notifies existing workers; paused peers receive it in their inbox without an automatic wake. Resume and Restore do not announce the same assignment again. For VS Code sign-in, the extension passes the authorized token to its Copilot runtime on the workspace host without saving it to workspace files or requiring a remote keychain.
 4. In the **Team** room, select only Lead under **Address agents to wake**. Send: “Ask Builder for two ideas for our next team test, and address Builder in your reply.” Watch Lead post through MCP and Builder start a turn. A reply is not guaranteed: unread counts decrease only after the workers explicitly acknowledge the messages.
 5. Pause Builder and send it a message. The assignment and unread message should persist, including through a window reload. **Restore Team** reconnects saved, unpaused roles; **Resume** reconnects a paused role explicitly. **Retry inbox** retries unacknowledged messages.
+
+The extension ID is `aitostack.agent-teams-mcp-vscode`. VS Code treats earlier test VSIXs under `uhvogala.agent-teams-mcp-vscode` as a separate extension. Installing the new VSIX does not replace the old extension or migrate its storage; disable or uninstall the old copy before using the new one in the same workspace.
 
 The **Rooms** list shows the latest message in each conversation. Select a room to open its transcript; **Back to rooms** keeps your draft and wake selections while the panel stays loaded. Your posts show your GitHub login or authorized VS Code account label and its initial when available, otherwise **You**. Press **Enter** to send or **Shift+Enter** to add a line break. Use **New room** to create a persistent group or an invite-only quick room. Closing a quick room stops new delivery and moves its transcript to **Archived**.
 
@@ -94,7 +96,9 @@ An inbox wake can use browser tools only while a connected editor supplies them.
 
 ### Start a team worker in native Chat (experimental)
 
-In desktop Insiders, run **Run Agent Teams with Native Chat** from Run and Debug. To use an installed VSIX instead, fully quit Insiders and launch it with `code-insiders --enable-proposed-api=uhvogala.agent-teams-mcp-vscode`. Open the trusted Agent Teams workspace, then run **Agent Teams: Start or Open Role in Native Chat (Experimental)** and choose a role. The extension asks for a model before starting a vacant role, resumes a paused role, or publishes an existing running worker without starting another one. Open its existing session under the **Agent Teams** host in Chat.
+The VS Code 1.148.0 install requirement does not enable proposed APIs. `chat.registerRemoteAgentHost` and `workspace.openTunnel` (needed for remote workspaces) are still proposed in 1.148.0. Experimental native Chat from a VSIX requires desktop VS Code Insiders with explicit opt-in.
+
+In desktop Insiders, run **Run Agent Teams with Native Chat** from Run and Debug. To use an installed VSIX instead, fully quit Insiders and launch it with `code-insiders --enable-proposed-api=aitostack.agent-teams-mcp-vscode`. Open the trusted Agent Teams workspace, then run **Agent Teams: Start or Open Role in Native Chat (Experimental)** and choose a role. The extension asks for a model before starting a vacant role, resumes a paused role, or publishes an existing running worker without starting another one. Open its existing session under the **Agent Teams** host in Chat.
 
 The command opts that worker session into the token-protected **Agent Teams** host in native Sessions. Opening a role in native Chat or restoring a published worker sets its default session title to the configured role display name, replacing any generated greeting title without changing the session or its history. A manual rename takes precedence. Workers started only in the Team panel can reply to room messages but are not listed in native Sessions. The host does not permit clients to create sessions. Remote workspaces require a desktop loopback forward.
 
@@ -138,6 +142,8 @@ npm run package -- linux-arm64
 ```
 
 Use **Run Agent Teams** in the VS Code Run and Debug view for development. Packaging supports Linux, macOS, and Windows on x64 or arm64, and stages the native SDK for the selected target. The tests use SQLite and the real Copilot runtime and MCP transport with a local scripted model; they do not consume Copilot credits.
+
+Run **Build VSIX** manually from Actions to build one downloadable artifact per target without creating a release. A pushed `v<version>` tag matching `package.json` also prepares a draft GitHub release with all six VSIXs attached. A maintainer can review the draft and decide when to make it public. The workflow never publishes to the Marketplace; Marketplace publishing remains on hold while Native Chat requires proposed APIs.
 
 The browser tests check authorization, tool arguments, and result routing with a simulated editor. For a desktop check, use a test page with a known button and form: open it from the worker's native Chat, verify clicks and screenshots, then send a separate addressed room message and check the same chat and its inbox acknowledgement.
 

@@ -1,12 +1,12 @@
 {
   "name": "agent-teams-mcp-vscode",
-  "publisher": "uhvogala",
+  "publisher": "aitostack",
   "displayName": "Agent Teams MCP",
   "description": "Workspace team rooms and role-based Copilot agents with a persistent MCP inbox.",
   "version": "0.1.4",
   "private": true,
   "engines": {
-    "vscode": "^1.146.0",
+    "vscode": "^1.148.0",
     "node": ">=22.12.0"
   },
   "categories": [
@@ -16,6 +16,10 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/uhvogala/agent-teams-mcp-vscode.git"
+  },
+  "homepage": "https://github.com/uhvogala/agent-teams-mcp-vscode#readme",
+  "bugs": {
+    "url": "https://github.com/uhvogala/agent-teams-mcp-vscode/issues"
   },
   "main": "./dist/extension.js",
   "extensionKind": [

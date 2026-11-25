@@ -14,7 +14,7 @@
       "request": "launch",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "--enable-proposed-api=uhvogala.agent-teams-mcp-vscode",
+        "--enable-proposed-api=aitostack.agent-teams-mcp-vscode",
         "${workspaceFolder}/.vscode/native-chat-probe.code-workspace"
       ],
       "preLaunchTask": "Build Agent Teams"
