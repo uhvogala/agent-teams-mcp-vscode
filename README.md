@@ -21,6 +21,9 @@ Run **Agent Teams: Edit Team Configuration** to create or open `.vscode/agent-te
 ```json
 {
   "defaultRecipientRoleId": "release-lead",
+  "defaults": {
+    "permissions": { "read": true, "edit": false, "run": false }
+  },
   "roles": [
     {
       "id": "release-lead",
@@ -38,7 +41,8 @@ Run **Agent Teams: Edit Team Configuration** to create or open `.vscode/agent-te
 - Release a role before removing it or changing its ID. If an assigned role is missing when you reload, restore its ID, reload, and release it from the Team panel before removing it again. Removing a vacant role removes its room memberships, not room transcripts.
 - The optional `prompt` is added to the worker's instructions alongside its description and Agent Teams' collaboration rules. It does not grant tool permissions. Do not include secrets; the description and prompt are sent to the worker's model.
 - The default prompts ask Lead to plan and hand off work, Builder to implement and verify it, and Reviewer to post actionable findings. Workers post requested replies in the room and acknowledge inbox deliveries separately. Acknowledging a message alone does not post a reply.
-- Use `"permissions": { "read": true, "edit": false, "run": true }` to override permissions per role. Lead and custom roles default to read-only; Builder defaults to read, edit and run; Reviewer defaults to read and run. The defaults for Lead, Builder and Reviewer follow their IDs, and explicit `false` overrides them. Save, reload and reconnect the existing workers to apply changes.
+- Set shared permissions in `defaults.permissions` and override individual fields in each role's `permissions`; explicit `false` wins. A role ID never grants edit or run access. Without a file, Agent Teams uses the same starter JSON the **Configure** action writes: Builder has explicit edit/run access, Reviewer has explicit run access, and Lead is read-only.
+- **Migrating an existing file:** If it relied on implicit Builder or Reviewer permissions, add `"permissions": { "edit": true, "run": true }` for Builder and `"permissions": { "run": true }` for Reviewer where intended, preserving any explicit restrictions. Otherwise omitted edit/run permissions are off. Save, reload, and reconnect the existing workers to apply changes.
 
 `read` controls the dedicated repository tools and also requires **Repository Read Access** to be enabled for the workspace. Editing and running may expose source to the worker through those operations. `edit` allows a worker to request approval for workspace edits. `run` allows it to request approval to run commands. By default commands run in the SDK sandbox with no network or sandbox bypass. When `edit` is off, the workspace is mounted read-only for commands; tests that need to write files must use scratch space. If the sandbox cannot start, commands fail rather than falling back.
 
@@ -50,7 +54,7 @@ In this checkout, all three roles use the native Copilot launch profile. Lead in
 
 ### Launch a role with native Copilot settings
 
-Add `"launch": {}` to a role in `.vscode/agent-teams.json` to publish the same worker to native Chat when you start it. This requires the [native Chat setup](#start-a-team-worker-in-native-chat-experimental). New workers inherit the mode and approval defaults from VS Code's `chat.defaultConfiguration`. To override them for a role, use, for example:
+Add `"launch": {}` to a role in `.vscode/agent-teams.json` to publish the same worker to native Chat when you start it. Use `defaults.launch` to share preferences among roles that explicitly opt in; each can override individual fields. A role without `launch` does not opt in. This requires the [native Chat setup](#start-a-team-worker-in-native-chat-experimental). Fields omitted in both places fall back to VS Code's `chat.defaultConfiguration` for new workers. To override them for a role, use, for example:
 
 ```json
 {
@@ -59,7 +63,7 @@ Add `"launch": {}` to a role in `.vscode/agent-teams.json` to publish the same w
 }
 ```
 
-- **Agent mode:** `interactive`, `plan`, or `autopilot`. **Approvals:** `manual`, `assisted`, or `allowAll`. If neither the role nor VS Code specifies a value, the defaults are Interactive and Manual permissions. Remove the legacy `permissions.promptForApproval` when adding `launch`; approval decisions now use native Chat rather than Agent Teams dialogs. If migrating an existing role that approved everything, select **Allow all** in its existing chat to keep that behavior. A headless turn cannot answer an interactive approval for you.
+- **Agent mode:** `interactive`, `plan`, or `autopilot`. **Approvals:** `manual`, `assisted`, or `allowAll`. If neither the team file nor VS Code specifies a value, the defaults are Interactive and Manual permissions. Remove the legacy `permissions.promptForApproval` from any role that uses `launch`, including shared permissions that apply to it; approval decisions now use native Chat rather than Agent Teams dialogs. If migrating an existing role that approved everything, select **Allow all** in its existing chat to keep that behavior. A headless turn cannot answer an interactive approval for you.
 - The launch picker shows the starting mode, approvals, and sandbox choice. Changes to mode or approvals in native Chat stay with that session; reopening or restoring does not reset them to the launch defaults. Mode changes take effect when the next native Chat turn starts. The SDK's published sessions don't support a live terminal sandbox toggle. The profile uses `chat.agent.sandbox.enabled` (or On if unset), unless the role overrides it with `permissions.sandbox`. Reconnect the role to apply a changed terminal sandbox setting.
 - The native profile adds standard file/search and terminal follow-up tools, mode-specific tools, and VS Code diagnostics, navigation, tasks, tests, notebooks, and native browser tools when advertised and permitted. Role read/edit/run settings still apply. Standard file tools are not limited to files tracked by Git, and editor execution tools are not offered to sandboxed roles because they run outside the SDK sandbox. Team tools remain available for inbox turns. The catalog is not identical to normal Chat: personal or cross-session tools are not inherited.
 

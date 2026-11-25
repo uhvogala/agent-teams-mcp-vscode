@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { TeamStore } from './store';
-import { loadTeamConfig, resolveRoleLaunch } from './team-config';
+import { defaultTeamConfig, resolveRoleLaunch } from './team-config';
 
 test('workspace definitions replace vacant defaults and preserve state for stable role IDs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-teams-config-'));
@@ -13,6 +13,8 @@ test('workspace definitions replace vacant defaults and preserve state for stabl
   let store: TeamStore | undefined;
   try {
     const defaults = await loadTeamConfig(config);
+    await writeFile(config, JSON.stringify(defaultTeamConfig));
+    assert.deepEqual(await loadTeamConfig(config), defaults, 'the generated starter and no-file fallback must agree');
     store = new TeamStore(db, defaults.roles);
     assert.deepEqual(store.roles().map(role => role.id), ['lead', 'builder', 'reviewer']);
     assert.equal(defaults.defaultRecipientRoleId, 'lead');
@@ -69,20 +71,20 @@ test('invalid configurations report syntax errors and duplicate role IDs instead
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('role permission overrides preserve defaults for omitted flags', async () => {
+test('permission defaults follow the config, not the role ID, and allow explicit false overrides', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-teams-permissions-'));
   const config = join(dir, 'agent-teams.json');
   try {
-    await writeFile(config, JSON.stringify({ roles: [
-      { id: 'builder', name: 'Author', description: 'Build.', permissions: { run: false } },
-      { id: 'reviewer', name: 'Reviewer', description: 'Review.' },
+    await writeFile(config, JSON.stringify({ defaults: { permissions: { run: true, sandbox: false } }, roles: [
+      { id: 'builder', name: 'Author', description: 'Build.', permissions: { run: false, sandbox: true } },
+      { id: 'custom-review', name: 'Reviewer', description: 'Review.' },
       { id: 'planner', name: 'Planner', description: 'Plan.', permissions: { read: false } },
     ] }));
     const store = new TeamStore(':memory:', (await loadTeamConfig(config)).roles);
     try {
-      assert.deepEqual(store.rolePermissions('builder'), { read: true, edit: true, run: false, browser: false, sandbox: true, promptForApproval: true });
-      assert.deepEqual(store.rolePermissions('reviewer'), { read: true, edit: false, run: true, browser: false, sandbox: true, promptForApproval: true });
-      assert.deepEqual(store.rolePermissions('planner'), { read: false, edit: false, run: false, browser: false, sandbox: true, promptForApproval: true });
+      assert.deepEqual(store.rolePermissions('builder'), { read: true, edit: false, run: false, browser: false, sandbox: true, promptForApproval: true });
+      assert.deepEqual(store.rolePermissions('custom-review'), { read: true, edit: false, run: true, browser: false, sandbox: false, promptForApproval: true });
+      assert.deepEqual(store.rolePermissions('planner'), { read: false, edit: false, run: true, browser: false, sandbox: false, promptForApproval: true });
     } finally { store.close(); }
     await writeFile(config, JSON.stringify({ browserPreviewPorts: [43251], roles: [
       { id: 'builder', name: 'Builder', description: 'Build.', permissions: { sandbox: false } },
@@ -92,8 +94,8 @@ test('role permission overrides preserve defaults for omitted flags', async () =
     assert(!Object.hasOwn(parsed, 'browserPreviewPorts'), 'accept the obsolete port list without applying it');
     const unsandboxed = new TeamStore(':memory:', parsed.roles);
     try {
-      assert.deepEqual(unsandboxed.rolePermissions('builder'), { read: true, edit: true, run: true, browser: false, sandbox: false, promptForApproval: true });
-      assert.deepEqual(unsandboxed.rolePermissions('reviewer'), { read: true, edit: false, run: true, browser: true, sandbox: false, promptForApproval: false });
+      assert.deepEqual(unsandboxed.rolePermissions('builder'), { read: true, edit: false, run: false, browser: false, sandbox: false, promptForApproval: true });
+      assert.deepEqual(unsandboxed.rolePermissions('reviewer'), { read: true, edit: false, run: false, browser: true, sandbox: false, promptForApproval: false });
     }
     finally { unsandboxed.close(); }
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -109,8 +111,31 @@ test('native launch options override individual editor defaults and reject legac
     assert(builder.launch);
     assert.deepEqual(resolveRoleLaunch(builder.launch, { mode: 'autopilot', approvals: 'manual' }),
       { mode: 'autopilot', approvals: 'allowAll' });
+    const defaults = { launch: { mode: 'plan' } };
+    const reviewer = { id: 'reviewer', name: 'Reviewer', description: 'Review.', permissions: { promptForApproval: false } };
+    const planner = { id: 'planner', name: 'Planner', description: 'Plan.', launch: {} };
+    await writeFile(path, JSON.stringify({ defaults, roles: [role, reviewer, planner] }));
+    const { roles } = await loadTeamConfig(path);
+    const [inheritedBuilder, legacyReviewer, inheritedPlanner] = roles;
+    assert.deepEqual(inheritedBuilder.launch, { mode: 'plan', approvals: 'allowAll' });
+    assert.equal(legacyReviewer.launch, undefined, 'shared defaults must not opt in legacy roles');
+    assert(inheritedPlanner.launch);
+    assert.deepEqual(resolveRoleLaunch(inheritedPlanner.launch, { approvals: 'assisted' }), { mode: 'plan', approvals: 'assisted' });
+    const store = new TeamStore(':memory:', roles);
+    try {
+      assert.equal(store.rolePermissions('reviewer').browser, false);
+      assert.equal(store.rolePermissions('reviewer').promptForApproval, false);
+      assert.equal(store.rolePermissions('planner').browser, true);
+    } finally { store.close(); }
     await writeFile(path, JSON.stringify({ roles: [{ ...role, permissions: { promptForApproval: false } }] }));
     await assert.rejects(loadTeamConfig(path), /Use launch\.approvals instead of promptForApproval/);
+    await writeFile(path, JSON.stringify({ defaults, roles: [{ ...reviewer, launch: {} }] }));
+    await assert.rejects(loadTeamConfig(path), /roles\.0\.permissions\.promptForApproval: Use launch\.approvals/);
+    const mixedDefaults = { ...defaults, permissions: { promptForApproval: false } };
+    await writeFile(path, JSON.stringify({ defaults: mixedDefaults, roles: [reviewer] }));
+    assert.equal((await loadTeamConfig(path)).roles[0].launch, undefined);
+    await writeFile(path, JSON.stringify({ defaults: mixedDefaults, roles: [planner] }));
+    await assert.rejects(loadTeamConfig(path), /defaults\.permissions\.promptForApproval: Use launch\.approvals/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

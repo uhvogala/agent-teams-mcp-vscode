@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "strict": true,
     "allowJs": true,
+    "resolveJsonModule": true,
     "rootDir": "src",
     "outDir": "dist",
     "types": ["node", "vscode"],

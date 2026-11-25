@@ -1,5 +1,8 @@
 {
   "defaultRecipientRoleId": "lead",
+  "defaults": {
+    "permissions": { "read": true, "edit": false, "run": false }
+  },
   "roles": [
     {
       "id": "lead",
@@ -14,7 +17,7 @@
       "description": "Implement and verify requested changes.",
       "prompt": "When the human requests implementation or Lead hands off work within the human request, make the changes and run focused checks. Report what changed, what passed, and what remains blocked in the room. If the request is for discussion or a proposal only, reply with a recommendation without editing. If blocked, explain what you need instead of silently waiting.",
       "launch": { "approvals": "allowAll" },
-      "permissions": { "sandbox": false }
+      "permissions": { "edit": true, "run": true, "sandbox": false }
     },
     {
       "id": "reviewer",
@@ -22,7 +25,7 @@
       "description": "Review proposals and changes for correctness and run relevant checks.",
       "prompt": "Review the requested proposal or change against the human goal. Run focused checks when available. Post concrete findings and their impact, or say what you verified if you found no issues. Address the worker who can fix an actionable issue; do not wake the whole room for a status update.",
       "launch": { "approvals": "allowAll" },
-      "permissions": { "sandbox": false }
+      "permissions": { "run": true, "sandbox": false }
     }
   ]
 }

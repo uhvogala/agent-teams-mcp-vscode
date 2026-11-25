@@ -4,6 +4,48 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["roles"],
+  "definitions": {
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["interactive", "plan", "autopilot"],
+          "enumDescriptions": ["Step-by-step collaboration.", "Plan first, execute when ready.", "Work autonomously within permissions."]
+        },
+        "approvals": {
+          "type": "string",
+          "enum": ["manual", "assisted", "allowAll"],
+          "enumDescriptions": ["Manual permissions: ask when approval settings don't apply.", "Assisted permissions: evaluate risk before running tools.", "Allow all: run available tools without asking, subject to managed policy."]
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "read": { "type": "boolean", "description": "Use read-only repository tools when enabled for the workspace." },
+        "edit": { "type": "boolean", "description": "Request approval to edit files in the workspace." },
+        "run": { "type": "boolean", "description": "Request approval to run a command." },
+        "browser": { "type": "boolean", "description": "Use VS Code's native Integrated Browser tools when advertised by the editor. On by default for native launch profiles; off otherwise." },
+        "sandbox": { "type": "boolean", "description": "Override the terminal sandbox at launch. Native launch profiles inherit chat.agent.sandbox.enabled; other roles default to sandboxed. Unsandboxed commands can read and write files and use the network as the workspace host user." },
+        "promptForApproval": { "type": "boolean", "default": true, "description": "Legacy roles only; use launch.approvals for native approval controls. Set to false to approve allowed workspace edits or commands without dialogs." }
+      }
+    },
+    "withoutLegacyApproval": {
+      "properties": { "permissions": { "not": { "required": ["promptForApproval"] } } }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["defaults"],
+        "properties": { "defaults": { "required": ["permissions"], "properties": { "permissions": { "required": ["promptForApproval"] } } } }
+      },
+      "then": { "properties": { "roles": { "items": { "not": { "required": ["launch"] } } } } }
+    }
+  ],
   "properties": {
     "browserPreviewPorts": {
       "description": "Obsolete. VS Code now controls browser access.",
@@ -17,6 +59,18 @@
       "type": "string",
       "maxLength": 64,
       "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "defaults": {
+      "description": "Shared role settings. Each role can override individual fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "launch": {
+          "description": "Share native Copilot preferences for roles that declare launch. Unset values fall back to chat.defaultConfiguration.",
+          "allOf": [{ "$ref": "#/definitions/launch" }]
+        },
+        "permissions": { "$ref": "#/definitions/permissions" }
+      }
     },
     "roles": {
       "description": "Workspace roster. This replaces the default roster.",
@@ -50,38 +104,16 @@
             "type": "string"
           },
           "launch": {
-            "description": "Use native Copilot permissions and the expanded Copilot tool catalog for this role. New sessions inherit omitted values from chat.defaultConfiguration; existing sessions retain their selections.",
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "mode": {
-                "type": "string",
-                "enum": ["interactive", "plan", "autopilot"],
-                "enumDescriptions": ["Step-by-step collaboration.", "Plan first, execute when ready.", "Work autonomously within permissions."]
-              },
-              "approvals": {
-                "type": "string",
-                "enum": ["manual", "assisted", "allowAll"],
-                "enumDescriptions": ["Manual permissions: ask when approval settings don't apply.", "Assisted permissions: evaluate risk before running tools.", "Allow all: run available tools without asking, subject to managed policy."]
-              }
-            }
+            "description": "Opt this role into native Copilot launch or override shared launch preferences. Unset values fall back to chat.defaultConfiguration.",
+            "allOf": [{ "$ref": "#/definitions/launch" }]
           },
           "permissions": {
-            "description": "Override the role's default workspace permissions.",
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "read": { "type": "boolean", "description": "Use read-only repository tools when enabled for the workspace." },
-              "edit": { "type": "boolean", "description": "Request approval to edit files in the workspace." },
-              "run": { "type": "boolean", "description": "Request approval to run a command." },
-              "browser": { "type": "boolean", "description": "Use VS Code's native Integrated Browser tools when advertised by the editor. On by default for native launch profiles; off otherwise." },
-              "sandbox": { "type": "boolean", "description": "Override the terminal sandbox at launch. Native launch profiles inherit chat.agent.sandbox.enabled; other roles default to sandboxed. Unsandboxed commands can read and write files and use the network as the workspace host user." },
-              "promptForApproval": { "type": "boolean", "default": true, "description": "Legacy roles only; use launch.approvals for native approval controls. Set to false to approve allowed workspace edits or commands without dialogs." }
-            }
+            "description": "Override individual shared workspace permissions. Role IDs never grant tool access.",
+            "allOf": [{ "$ref": "#/definitions/permissions" }]
           }
         },
         "if": { "required": ["launch"] },
-        "then": { "properties": { "permissions": { "not": { "required": ["promptForApproval"] } } } }
+        "then": { "$ref": "#/definitions/withoutLegacyApproval" }
       }
     }
   }
