@@ -249,6 +249,7 @@ export async function startProbe({ joinable = false, approval = false, log = con
       },
       get createdSessionId() { return remoteSessionId; },
       assignedSessions: () => current().roster.roles().flatMap(role => role.sessionId ? [role.sessionId] : []),
+      assignmentAnnouncements: () => current().roster.transcript('team').filter(message => message.author === 'Agent Teams'),
       sdkModels: () => current().client.listModels(),
       leadStatus: () => current().leadStatus(),
       isAcknowledged,

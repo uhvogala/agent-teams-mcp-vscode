@@ -8,14 +8,20 @@ export type Room = { id: string; title: string; kind: 'group' | 'quick'; closed:
 type RoomSummary = Room & { memberCount: number; lastAuthor: string | null; lastBody: string | null };
 export type Message = {
   seq: number; id: string; roomId: string; author: string; body: string;
+  attachmentCount?: number;
   replyTo?: { id: string; author: string; preview: string };
 };
-type MessageRow = Omit<Message, 'replyTo'> & { parentId: string | null; parentAuthor: string | null; parentPreview: string | null };
-const replyColumns = 'm.*, p.id AS parentId, p.author AS parentAuthor, substr(p.body, 1, 180) AS parentPreview';
+type MessageRow = Omit<Message, 'replyTo' | 'attachmentCount'> & {
+  parentId: string | null; parentAuthor: string | null; parentPreview: string | null; attachmentCount: number;
+};
+const replyColumns = `m.*, p.id AS parentId, p.author AS parentAuthor,
+  coalesce(nullif(substr(p.body, 1, 180), ''), 'Image attachment') AS parentPreview,
+  (SELECT count(*) FROM message_attachments WHERE messageId=m.id) AS attachmentCount`;
 const replyJoins = 'LEFT JOIN message_links link ON link.messageId=m.id LEFT JOIN messages p ON p.id=link.replyTo';
-function toMessage({ parentId, parentAuthor, parentPreview, ...message }: MessageRow): Message {
+function toMessage({ parentId, parentAuthor, parentPreview, attachmentCount, ...message }: MessageRow): Message {
+  const content = attachmentCount ? { ...message, attachmentCount } : message;
   return parentId !== null && parentAuthor !== null && parentPreview !== null
-    ? { ...message, replyTo: { id: parentId, author: parentAuthor, preview: parentPreview } } : message;
+    ? { ...content, replyTo: { id: parentId, author: parentAuthor, preview: parentPreview } } : content;
 }
 const maxChainWakes = 32;
 const inboxLimit = 20;
@@ -47,6 +53,10 @@ export class TeamStore {
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
         roomId TEXT NOT NULL REFERENCES rooms(id), author TEXT NOT NULL, body TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        messageId TEXT NOT NULL REFERENCES messages(id), position INTEGER NOT NULL, png BLOB NOT NULL,
+        PRIMARY KEY(messageId,position)
+      );
       CREATE TABLE IF NOT EXISTS delivery (
         messageId TEXT NOT NULL REFERENCES messages(id), sessionId TEXT NOT NULL, wake INTEGER NOT NULL,
         attempted INTEGER NOT NULL DEFAULT 0, read INTEGER NOT NULL DEFAULT 0, ack INTEGER NOT NULL DEFAULT 0,
@@ -71,6 +81,10 @@ export class TeamStore {
         if (!this.db.prepare("SELECT 1 FROM pragma_table_info('delivery') WHERE name='recipientName'").get()) {
           this.db.exec(`ALTER TABLE delivery ADD COLUMN recipientName TEXT;
             UPDATE delivery SET recipientName=(SELECT name FROM roles WHERE roles.sessionId=delivery.sessionId);`);
+        }
+        if (!this.db.prepare("SELECT 1 FROM pragma_table_info('delivery') WHERE name='wakeLimited'").get()) {
+          this.db.exec(`ALTER TABLE delivery ADD COLUMN wakeLimited INTEGER NOT NULL DEFAULT 0;
+            UPDATE delivery SET wakeLimited=1 WHERE wake=0 AND messageId IN (SELECT messageId FROM message_wake_chains);`);
         }
         const removed = this.roles().filter(role => !this.definitions.has(role.id));
         const occupied = removed.filter(role => role.sessionId).map(role => role.id);
@@ -127,6 +141,21 @@ export class TeamStore {
     if (!result.changes) throw new Error('The saved reservation no longer belongs to this worker.');
   }
 
+  assignAndAnnounce(roleId: string, sessionId: string, reserveVacant = false) {
+    return this.transaction(() => {
+      if (reserveVacant) this.reserve(roleId, sessionId);
+      this.assign(roleId, sessionId);
+      const { name, description } = this.role(roleId);
+      const peers = this.db.prepare(`SELECT r.sessionId,r.name,r.paused FROM roles r
+        JOIN members m ON m.roleId=r.id WHERE m.roomId='team' AND r.phase='assigned'
+        AND r.sessionId<>? ORDER BY r.rowid`).all(sessionId) as { sessionId: string; name: string; paused: number }[];
+      const recipients = new Map(peers.map(peer => [peer.sessionId, peer.name]));
+      const wakeEligible = new Set(peers.filter(peer => !peer.paused).map(peer => peer.sessionId));
+      return this.insertPost('team', 'Agent Teams', `${name} (${roleId}) joined the team. Responsibility: ${description}`,
+        recipients, true, undefined, undefined, [], wakeEligible);
+    });
+  }
+
   pause(sessionId: string, paused: boolean) {
     this.db.prepare('UPDATE roles SET paused=? WHERE sessionId=?').run(Number(paused), sessionId);
   }
@@ -146,7 +175,8 @@ export class TeamStore {
   }
 
   roomSummaries() {
-    return this.db.prepare(`SELECT r.*, m.author AS lastAuthor, substr(m.body, 1, 180) AS lastBody,
+    return this.db.prepare(`SELECT r.*, m.author AS lastAuthor,
+       CASE WHEN m.body='' THEN 'Image attachment' ELSE substr(m.body, 1, 180) END AS lastBody,
       (SELECT count(*) FROM members WHERE roomId=r.id) AS memberCount
       FROM rooms r LEFT JOIN messages m ON m.seq=(SELECT seq FROM messages WHERE roomId=r.id ORDER BY seq DESC LIMIT 1)
       ORDER BY (r.id='team') DESC, m.seq DESC, r.rowid DESC`).all() as RoomSummary[];
@@ -185,9 +215,9 @@ export class TeamStore {
         'unread', json(CASE d.ack WHEN 0 THEN 'true' ELSE 'false' END),
         'state', CASE WHEN d.ack=1 THEN 'acknowledged'
           WHEN d.attempted=1 THEN 'attempted' WHEN d.wake=1 THEN 'queued'
-          WHEN chain.chainId IS NOT NULL THEN 'wake-limited' ELSE 'inbox-only' END)
+          WHEN d.wakeLimited=1 THEN 'wake-limited' ELSE 'inbox-only' END)
         ORDER BY d.recipientName, d.rowid) FROM delivery d WHERE d.messageId=m.id) AS recipientsJson
-      FROM messages m ${replyJoins} LEFT JOIN message_wake_chains chain ON chain.messageId=m.id
+      FROM messages m ${replyJoins}
       WHERE m.roomId=? ORDER BY m.seq DESC LIMIT 100`).all(id) as
       (MessageRow & { recipientsJson: string })[];
     return rows.reverse().map(({ recipientsJson, ...row }) => ({
@@ -196,7 +226,8 @@ export class TeamStore {
   }
 
   post(roomId: string, author: string, body: string, targets: string[], wake: boolean | string,
-    source?: { roleId: string; sessionId: string }, replyTo?: string, humanFallback: readonly string[] = []) {
+    source?: { roleId: string; sessionId: string }, replyTo?: string, humanFallback: readonly string[] = [],
+    attachments: readonly Buffer[] = []) {
     return this.transaction(() => {
       if (!this.db.prepare('SELECT 1 FROM rooms WHERE id=? AND closed=0').get(roomId)) throw new Error('Room is closed or unavailable.');
       const members = this.roomMembers(roomId);
@@ -231,29 +262,75 @@ export class TeamStore {
           break;
         }
       }
-      const id = randomUUID();
-      this.db.prepare('INSERT INTO messages(id,roomId,author,body) VALUES (?,?,?,?)').run(id, roomId, author, body);
-      if (source || replyTo) {
-        this.db.prepare('INSERT INTO message_links(messageId,authorSessionId,replyTo) VALUES (?,?,?)')
-          .run(id, source?.sessionId ?? null, replyTo ?? null);
-      }
-      let wakeCount = 0;
-      if (wake && recipients.size) {
-        const chain = wake === true ? id : wake;
-        this.db.prepare('INSERT OR IGNORE INTO wake_chains(id,scheduled) VALUES (?,0)').run(chain);
-        const { scheduled } = this.db.prepare('SELECT scheduled FROM wake_chains WHERE id=?').get(chain) as { scheduled: number };
-        wakeCount = Math.min(recipients.size, maxChainWakes - scheduled);
-        this.db.prepare('UPDATE wake_chains SET scheduled=scheduled+? WHERE id=?').run(wakeCount, chain);
-        this.db.prepare('INSERT INTO message_wake_chains(messageId,chainId) VALUES (?,?)').run(id, chain);
-      }
-      const delivered = [...recipients.keys()];
-      let index = 0;
-      for (const [session, name] of recipients) {
-        this.db.prepare('INSERT INTO delivery(messageId,sessionId,wake,recipientName) VALUES (?,?,?,?)')
-          .run(id, session, Number(index++ < wakeCount), name);
-      }
-      return { id, sessions: delivered, wakeSessions: delivered.slice(0, wakeCount), wakeLimited: Boolean(wake && wakeCount < delivered.length) };
+      return this.insertPost(roomId, author, body, recipients, wake, source, replyTo, attachments);
     });
+  }
+
+  private insertPost(roomId: string, author: string, body: string, recipients: ReadonlyMap<string, string>, wake: boolean | string,
+    source?: { sessionId: string }, replyTo?: string, attachments: readonly Buffer[] = [],
+    wakeEligible: ReadonlySet<string> = new Set(recipients.keys())) {
+    const id = randomUUID();
+    this.db.prepare('INSERT INTO messages(id,roomId,author,body) VALUES (?,?,?,?)').run(id, roomId, author, body);
+    if (attachments.length) {
+      const insert = this.db.prepare('INSERT INTO message_attachments(messageId,position,png) VALUES (?,?,?)');
+      attachments.forEach((png, position) => insert.run(id, position, png));
+    }
+    if (source || replyTo) {
+      this.db.prepare('INSERT INTO message_links(messageId,authorSessionId,replyTo) VALUES (?,?,?)')
+        .run(id, source?.sessionId ?? null, replyTo ?? null);
+    }
+    let wakeCount = 0;
+    if (wake && wakeEligible.size) {
+      const chain = wake === true ? id : wake;
+      this.db.prepare('INSERT OR IGNORE INTO wake_chains(id,scheduled) VALUES (?,0)').run(chain);
+      const { scheduled } = this.db.prepare('SELECT scheduled FROM wake_chains WHERE id=?').get(chain) as { scheduled: number };
+      wakeCount = Math.min(wakeEligible.size, maxChainWakes - scheduled);
+      this.db.prepare('UPDATE wake_chains SET scheduled=scheduled+? WHERE id=?').run(wakeCount, chain);
+      this.db.prepare('INSERT INTO message_wake_chains(messageId,chainId) VALUES (?,?)').run(id, chain);
+    }
+    const wakeSessions: string[] = [];
+    const insert = this.db.prepare('INSERT INTO delivery(messageId,sessionId,wake,recipientName,wakeLimited) VALUES (?,?,?,?,?)');
+    for (const [session, name] of recipients) {
+      const requested = Boolean(wake && wakeEligible.has(session));
+      const queued = requested && wakeSessions.length < wakeCount;
+      if (queued) wakeSessions.push(session);
+      insert.run(id, session, Number(queued), name, Number(requested && !queued));
+    }
+    return { id, sessions: [...recipients.keys()], wakeSessions, wakeLimited: Boolean(wake && wakeCount < wakeEligible.size) };
+  }
+
+  readAttachment(roomId: string, messageId: string, position: number) {
+    const row = this.db.prepare(`SELECT a.png FROM message_attachments a JOIN messages m ON m.id=a.messageId
+      WHERE m.roomId=? AND a.messageId=? AND a.position=?`).get(roomId, messageId, position);
+    if (!(row?.png instanceof Uint8Array)) throw new Error('Image attachment is unavailable in this room.');
+    return Buffer.from(row.png);
+  }
+
+  private requireAttachmentRoom(sessionId: string, roomId: string) {
+    if (!this.db.prepare(`SELECT 1 FROM roles worker
+      JOIN members member ON member.roleId=worker.id
+      JOIN rooms room ON room.id=member.roomId AND room.closed=0
+      WHERE worker.sessionId=? AND worker.phase='assigned' AND worker.paused=0 AND room.id=?`).get(sessionId, roomId)) {
+      throw new Error('Image attachments are unavailable in this room.');
+    }
+  }
+
+  listWorkerAttachments(sessionId: string, roomId: string, beforeSeq?: number) {
+    this.requireAttachmentRoom(sessionId, roomId);
+    const limit = 20;
+    const rows = this.db.prepare(`SELECT m.id AS messageId, m.seq, m.author,
+        (SELECT count(*) FROM message_attachments WHERE messageId=m.id) AS attachmentCount
+      FROM messages m WHERE m.roomId=? AND m.seq<?
+        AND EXISTS (SELECT 1 FROM message_attachments WHERE messageId=m.id)
+      ORDER BY m.seq DESC LIMIT ?`).all(roomId, beforeSeq ?? Number.MAX_SAFE_INTEGER, limit + 1) as
+      { messageId: string; seq: number; author: string; attachmentCount: number }[];
+    const posts = rows.slice(0, limit);
+    return { posts, nextBeforeSeq: rows.length > limit ? posts[limit - 1].seq : null };
+  }
+
+  readWorkerAttachment(sessionId: string, roomId: string, messageId: string, position: number) {
+    this.requireAttachmentRoom(sessionId, roomId);
+    return this.readAttachment(roomId, messageId, position);
   }
 
   unread(sessionId: string) {

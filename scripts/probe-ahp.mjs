@@ -161,7 +161,11 @@ try {
         const action = actionOf(frame);
         return action?.type === 'chat/turnComplete' && action.turnId === turnId;
       }), 'AHP input turn completion');
-      if (joinable) assert.deepEqual(probe.assignedSessions(), index === 0 ? [] : [sessionId]);
+      if (joinable) {
+        assert.deepEqual(probe.assignedSessions(), index === 0 ? [] : [sessionId]);
+        assert.deepEqual(probe.assignmentAnnouncements().map(message => message.body),
+          index === 0 ? [] : ['Lead (lead) joined the team. Responsibility: Coordinate the team, clarify priorities, and track decisions.']);
+      }
     }
     if (joinable) console.log('Declining left Lead vacant; approval assigned the existing chat without creating another.');
     const wakeIds = [];
@@ -184,6 +188,7 @@ try {
     }
     assert.deepEqual((await observer.request('listSessions', { channel: root })).items.map(item => item.resource), [sessionUri]);
     assert.deepEqual(probe.assignedSessions(), [sessionId]);
+    assert.equal(probe.assignmentAnnouncements().length, 1, 'Reopening must not announce the same assignment again.');
     console.log('Reopening the AHP transcript showed the original prompts and the Team wake, with the original session ID.');
     if (stopQueued) {
       const turnId = randomUUID();
@@ -203,6 +208,7 @@ try {
       const id = probe.queueWhileBusy();
       assert.equal(probe.leadStatus()?.unread, 1);
       assert(!probe.isAcknowledged(id));
+      assert.equal(probe.assignmentAnnouncements().length, 1, 'Reattaching after restart must not announce again.');
       const beforeStop = observer.frames.length;
       dispatch(2, { type: 'chat/turnCancelled', turnId, duration: 0 });
       await until(() => observer.frames.slice(beforeStop).map(actionOf).some(action =>

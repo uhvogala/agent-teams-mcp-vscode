@@ -4,23 +4,31 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import * as vscode from 'vscode';
 import { z } from 'zod';
+import { decodePngAttachment, maxAttachmentBase64, maxAttachments } from './attachments';
 import { SignInCancelled } from './auth';
 import { postTeamFromChat, prepareTeamChatMessage, readTeamForChat } from './chat';
 import { editorGitHubAuthorization } from './editor-auth';
 import { renderMessageMarkdown } from './markdown';
-import { body, id, roomKind, title } from './mcp';
+import { id, roomKind, title } from './mcp';
 import { connectNativeChat } from './native-chat';
 import { TeamStore } from './store';
 import { Team } from './team';
 import { defaultTeamConfig, loadTeamConfig, teamConfigPath } from './team-config';
+import { checkWorkspaceReferenceRange, resolveWorkspaceReference } from './workspace-reference';
 
+const previewAttachmentRoom = z.object({ action: z.literal('previewAttachments'), roomId: id });
 const request = z.discriminatedUnion('action', [
   z.object({ action: z.enum(['ready', 'restore', 'configure', 'back']) }),
   z.object({ action: z.enum(['start', 'pause', 'release', 'retry']), roleId: id }),
   z.object({ action: z.literal('select'), roomId: id }),
   z.object({ action: z.literal('close'), roomId: id }),
   z.object({ action: z.literal('create'), title, kind: roomKind, members: z.array(id).max(10) }),
-  z.object({ action: z.literal('post'), roomId: id, body, targets: z.array(id).max(10), replyTo: id.optional() }),
+  z.object({ action: z.literal('post'), roomId: id, body: z.string().trim().max(4000), targets: z.array(id).max(10),
+    replyTo: id.optional(), attachments: z.array(z.string().max(maxAttachmentBase64)).max(maxAttachments).optional() }),
+  z.object({ action: z.literal('openReference'), reference: z.string().max(512) }),
+  previewAttachmentRoom.extend({
+    attachments: z.array(z.string().max(maxAttachmentBase64)).min(1).max(maxAttachments) }),
+  z.object({ action: z.literal('readAttachment'), roomId: id, messageId: id, position: z.number().int().min(0).lt(maxAttachments) }),
 ]);
 let shutdown: (() => Promise<void>) | undefined;
 
@@ -47,13 +55,15 @@ export async function activate(context: vscode.ExtensionContext) {
     const roles = team?.roster() ?? [];
     const rooms = store?.roomSummaries() ?? [];
     const active = rooms.find(room => room.id === selectedRoom);
+    const members = active ? store?.roomMembers(active.id) ?? [] : [];
+    const mentionMembers = new Set(members);
     void panel.webview.postMessage({
       type: 'state', roles, rooms, active, unavailable, needsRestore: team?.needsRestore ?? false,
       restoring: Boolean(restoring),
       login: team?.signedInLogin ?? editorAccountLabel,
-      members: active ? store?.roomMembers(active.id) : [],
+      members,
       transcript: active ? store?.transcript(active.id).map(message => ({
-        ...message, bodyHtml: renderMessageMarkdown(message.body),
+        ...message, bodyHtml: renderMessageMarkdown(message.body, mentionMembers),
       })) : [],
     });
   };
@@ -98,6 +108,14 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         return await vscode.window.showWarningMessage(`${role.name} wants to ${unsandboxed ? 'run a command without sandboxing' : command ? 'run a workspace command' : 'edit workspace files'}.`,
           { modal: true, detail }, action) === action;
+      }, async role => {
+        const [file] = await vscode.window.showOpenDialog({
+          title: `Select a PNG for ${role.name} to share in Agent Teams`,
+          openLabel: 'Allow worker to use this image',
+          defaultUri: folder.uri, canSelectMany: false, filters: { 'PNG images': ['png'] },
+        }) ?? [];
+        if (file && file.scheme !== 'file') throw new Error('Choose a local file on this workspace extension host.');
+        return file?.fsPath;
       });
     } catch (error) {
       store?.close();
@@ -255,7 +273,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const style = view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'team.css'));
         view.webview.html = `<!doctype html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src ${view.webview.cspSource};">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}'; style-src ${view.webview.cspSource}; img-src blob:;">
 <link rel="stylesheet" href="${style}"><title>Agent Teams</title></head><body>
 <p id="status" role="status">Loading team...</p>
 <main id="team" hidden>
@@ -293,14 +311,28 @@ export async function activate(context: vscode.ExtensionContext) {
         <button id="cancel-reply" type="button" class="quiet" aria-label="Cancel reply" title="Cancel reply">×</button>
       </div>
       <label for="message" class="sr-only">Message</label>
-      <textarea id="message" rows="3" maxlength="4000" aria-describedby="reply-author mentions-hint hint" required></textarea>
+      <div class="message-input">
+        <div id="message-highlight" aria-hidden="true"></div>
+        <textarea id="message" rows="3" maxlength="4000" aria-describedby="reply-author mentions-hint hint"
+          aria-autocomplete="list" aria-controls="mention-options"></textarea>
+      </div>
+      <ul id="mention-options" role="listbox" aria-label="Mention a room member" hidden></ul>
+      <div id="draft-attachments" class="attachments" hidden></div>
+      <p id="attachment-status" class="issue" role="status" hidden></p>
       <p class="muted" id="mentions-hint">Select recipients or use @role-id or @all. Otherwise, one available room member is notified if possible.</p>
       <fieldset><legend>Wake agents</legend><div class="chips" id="targets"></div></fieldset>
       <div class="composer-footer"><span id="hint" class="muted">Shift+Enter for a new line</span><button id="send" type="submit">Send</button></div>
     </form>
   </section>
-</main><script nonce="${nonce}" src="${script}"></script></body></html>`;
+</main>
+<dialog id="image-preview" aria-labelledby="image-preview-title">
+  <div class="image-preview-header"><h2 id="image-preview-title">Image preview</h2>
+    <button id="close-image-preview" type="button" class="quiet" autofocus>Close</button></div>
+  <img id="image-preview-content" alt="">
+</dialog>
+<script nonce="${nonce}" src="${script}"></script></body></html>`;
         const sub = view.webview.onDidReceiveMessage(async (input: unknown) => {
+          let attachmentRequest: Extract<z.infer<typeof request>, { action: 'readAttachment' }> | undefined;
           try {
             const data = request.parse(input);
             if (data.action === 'ready') {
@@ -339,13 +371,49 @@ export async function activate(context: vscode.ExtensionContext) {
                 void view.webview.postMessage({ type: 'created' });
                 break;
               case 'close': service.store.closeRoom(data.roomId); break;
-              case 'post':
-                service.postHuman(data.roomId, data.body, data.targets, data.replyTo);
+              case 'post': {
+                if (data.roomId !== selectedRoom) throw new Error('Select the room before sending a message.');
+                const attachments = data.attachments?.map(decodePngAttachment);
+                if (!data.body && !attachments?.length) throw new Error('Enter a message or paste a PNG image.');
+                service.postHuman(data.roomId, data.body, data.targets, data.replyTo, attachments);
                 void view.webview.postMessage({ type: 'sent', roomId: data.roomId });
                 break;
+              }
+              case 'openReference': {
+                if (!folder || !vscode.workspace.isTrusted) throw new Error('Open a trusted workspace to follow file references.');
+                const { file, line, column } = await resolveWorkspaceReference(folder.uri.fsPath, data.reference);
+                const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+                checkWorkspaceReferenceRange(document, line, column);
+                if ((await resolveWorkspaceReference(folder.uri.fsPath, data.reference)).file !== file) {
+                  throw new Error('The referenced file changed while it was being opened.');
+                }
+                const position = new vscode.Position(line, column);
+                await vscode.window.showTextDocument(document, { selection: new vscode.Range(position, position) });
+                return;
+              }
+              case 'previewAttachments': {
+                const pngs = data.attachments.map(png => decodePngAttachment(png).toString('base64'));
+                void view.webview.postMessage({ type: 'attachmentPreviews', roomId: data.roomId, pngs });
+                return;
+              }
+              case 'readAttachment': {
+                attachmentRequest = data;
+                if (data.roomId !== selectedRoom) throw new Error('Select the room before viewing its attachments.');
+                const png = service.store.readAttachment(data.roomId, data.messageId, data.position);
+                void view.webview.postMessage({ ...data, type: 'image', png: png.toString('base64') });
+                return;
+              }
             }
             render();
           } catch (error) {
+            if (attachmentRequest) void view.webview.postMessage({ ...attachmentRequest, type: 'imageFailed' });
+            const preview = previewAttachmentRoom.safeParse(input);
+            if (preview.success) {
+              const message = error instanceof Error ? error.message : String(error);
+              output.appendLine(message);
+              void view.webview.postMessage({ type: 'attachmentPreviews', roomId: preview.data.roomId, error: message });
+              return;
+            }
             if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'post') {
               void view.webview.postMessage({ type: 'sendFailed' });
             }

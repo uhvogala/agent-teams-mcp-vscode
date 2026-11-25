@@ -7,6 +7,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CopilotClient } from '@microsoft/copilot-sdk';
+import { PNG } from 'pngjs';
+import { encode as encodeJpeg } from 'jpeg-js';
+import { decodeScreenshot } from './attachments';
 import { SignInCancelled } from './auth';
 import { postTeamFromChat, prepareTeamChatMessage, readTeamForChat } from './chat';
 import { TeamStore } from './store';
@@ -277,6 +280,23 @@ test('the real SDK and MCP relay notifications and restore previously published 
   let taskCompletionCalls = 0;
   const toolCatalog = new Map<string, string[] | undefined>();
   let continuedThread = false;
+  const image = new PNG({ width: 1, height: 1 });
+  image.data.set([40, 90, 130, 255]);
+  const imageBytes = PNG.sync.write(image);
+  const generatedPng = join(workspace, 'generated-image.png');
+  await writeFile(generatedPng, imageBytes);
+  const screenshotJpeg = encodeJpeg(image, 100).data.toString('base64');
+  const expectedScreenshot = decodeScreenshot(screenshotJpeg, 'image/jpeg');
+  let screenshotArtifactId: string | undefined;
+  let screenshotTrace: unknown;
+  let screenshotAttachment: ModelImage | undefined;
+  let screenshotMessageId: string;
+  let foreignArtifactResult: string | undefined;
+  type ModelImage = { type: 'image_url'; image_url: { url: string } };
+  let modelImageResult: ModelImage | undefined;
+  let imageSourceId: string;
+  let imageOtherRoom: string;
+  const imagePostResults: string[] = [];
   let delegationDescription: string | undefined;
   let delegationRooms: string | undefined;
   let calls = 0;
@@ -287,7 +307,7 @@ test('the real SDK and MCP relay notifications and restore previously published 
       let raw = '';
       for await (const chunk of req) raw += chunk;
       const request: {
-        messages: { role: string; content?: string }[];
+        messages: { role: string; content?: string | ({ type: 'text'; text: string } | ModelImage)[] }[];
         tools?: { function: { name: string; description?: string } }[];
         stream?: boolean;
       } = JSON.parse(raw);
@@ -295,8 +315,9 @@ test('the real SDK and MCP relay notifications and restore previously published 
       for (const message of request.messages) {
         if (message.role === 'system' && typeof message.content === 'string') systemPrompts.add(message.content);
       }
-      const index = request.messages.map(message => message.role).lastIndexOf('user');
-      const prompt = request.messages[index]?.content ?? '';
+      const index = request.messages.map(message => message.role === 'user' && typeof message.content === 'string').lastIndexOf(true);
+      const promptContent = request.messages[index]?.content;
+      const prompt = typeof promptContent === 'string' ? promptContent : '';
       const after = request.messages.slice(index + 1).filter(message => message.role === 'tool');
       const batch = /\["[a-f0-9-]+"(?:,"[a-f0-9-]+")*\]/.exec(prompt)?.[0];
       const ids: string[] = batch ? JSON.parse(batch) : [];
@@ -304,7 +325,7 @@ test('the real SDK and MCP relay notifications and restore previously published 
       const inboxResult: {
         messages?: { body: string }[];
         threads?: { anchorId: string; ancestorsIncomplete: boolean }[];
-      } = id && after[0]?.content
+      } = id && typeof after[0]?.content === 'string'
         ? JSON.parse(after[0].content) : {};
       const deliveredBody = inboxResult.messages?.[0]?.body;
       let tool: string | undefined;
@@ -317,13 +338,39 @@ test('the real SDK and MCP relay notifications and restore previously published 
         if (after.length === 1) {
           tool = 'read_thread'; args = { anchorId: page.anchorId };
         } else if (after.length <= 3) {
-          const continuation = JSON.parse(after.at(-1)?.content ?? '{}');
+          const content = after.at(-1)?.content;
+          const continuation = JSON.parse(typeof content === 'string' ? content : '{}');
           if (continuation.nextAfterSeq !== null) {
             tool = 'read_thread'; args = {
               anchorId: page.anchorId, afterSeq: continuation.nextAfterSeq, throughSeq: continuation.throughSeq,
             };
           } else {
             continuedThread = continuation.messages.some((post: { body: string }) => post.body === 'Last quiet branch');
+            tool = 'ack_message'; args = { id };
+          }
+        }
+      } else if (deliveredBody === 'Check image delivery') {
+        if (after.length === 1) {
+          tool = 'list_attachments'; args = { roomId: 'team' };
+        } else if (after.length === 2) {
+          const content = after[1].content;
+          assert(typeof content === 'string');
+          const listing = JSON.parse(content);
+          tool = 'read_attachment'; args = { roomId: 'team', messageId: listing.posts[0].messageId, index: 0 };
+        } else if (after.length === 3) {
+          modelImageResult = request.messages.slice(index + 1).flatMap(message =>
+            Array.isArray(message.content) ? message.content : []).find(part => part.type === 'image_url');
+          tool = 'post_message'; args = { roomId: 'team', attachments: [{ messageId: imageSourceId, index: 0 }] };
+        } else if (after.length >= 4 && after.length <= 6) {
+          const content = after.at(-1)?.content;
+          assert(typeof content === 'string');
+          imagePostResults.push(content);
+          if (after.length === 4) {
+            tool = 'post_message'; args = { roomId: imageOtherRoom, attachments: [{ messageId: imageSourceId, index: 0 }] };
+          } else if (after.length === 5) {
+            tool = 'post_message'; args = { roomId: 'team', body: 'Here is the image', replyTo: id, targets: ['builder'],
+              attachments: [{ messageId: imageSourceId, index: 0 }] };
+          } else {
             tool = 'ack_message'; args = { id };
           }
         }
@@ -337,7 +384,8 @@ test('the real SDK and MCP relay notifications and restore previously published 
         delegationDescription = request.tools?.find(candidate => candidate.function.name.endsWith('post_message'))?.function.description;
         tool = 'list_rooms';
       } else if (prompt.includes('NATIVE-DELEGATE') && after.length < 3) {
-        delegationRooms = after[0].content;
+        const content = after[0].content;
+        delegationRooms = typeof content === 'string' ? content : undefined;
         tool = 'post_message';
         args = {
           roomId: 'team',
@@ -351,10 +399,10 @@ test('the real SDK and MCP relay notifications and restore previously published 
         repositoryTrace.push({ after, tools: request.tools?.map(candidate => candidate.function.name) });
         if (!after.length) {
           tool = 'list_repository_files'; args = { prefix: 'README' };
-        } else if (after.length === 1 && after[0].content?.includes('README.md')) {
+        } else if (after.length === 1 && typeof after[0].content === 'string' && after[0].content.includes('README.md')) {
           tool = 'read_repository_file'; args = { path: 'README.md' };
         } else if (after.length === 2) {
-          sawRepositoryContents = Boolean(after[1].content?.includes('DOGFOOD-README-FIXTURE'));
+          sawRepositoryContents = typeof after[1].content === 'string' && after[1].content.includes('DOGFOOD-README-FIXTURE');
         }
       }
       const shellCommands = {
@@ -373,7 +421,39 @@ test('the real SDK and MCP relay notifications and restore previously published 
       const operation = edit ?? shellOperation?.[0] ?? browser ??
         (basicTools ? 'BASIC-EDITOR-TOOLS' : prompt.includes('COPILOT-LAUNCH-TOOLS') ? 'COPILOT-LAUNCH-TOOLS' : undefined);
       if (operation) toolCatalog.set(operation, request.tools?.map(candidate => candidate.function.name));
-      if (operation && after.length) operationOutput.set(operation, after.at(-1)?.content ?? '');
+      const operationResult = after.at(-1)?.content;
+      if (prompt.includes('BUILDER-BROWSER')) {
+        screenshotTrace = { messages: request.messages.slice(index + 1), tools: request.tools?.map(candidate => candidate.function.name) };
+        if (after.length === 1) {
+          tool = 'screenshotPage'; args = { pageId: 'fixture-page' };
+        } else if (after.length === 2) {
+          screenshotArtifactId = /artifactId[^a-z0-9]+([a-f0-9-]{36})/.exec(JSON.stringify(request.messages))?.[1];
+          if (screenshotArtifactId) {
+            tool = 'post_message'; args = { roomId: 'team', body: 'Captured fixture screenshot',
+              attachments: [{ artifactId: screenshotArtifactId }] };
+          }
+        }
+      } else if (prompt.includes('VERIFY-SCREENSHOT')) {
+        if (!after.length) {
+          tool = 'post_message'; args = { roomId: 'team', attachments: [{ artifactId: screenshotArtifactId }] };
+        } else if (after.length === 1) {
+          foreignArtifactResult = typeof operationResult === 'string' ? operationResult : undefined;
+          tool = 'read_attachment'; args = { roomId: 'team', messageId: screenshotMessageId, index: 0 };
+        } else {
+          screenshotAttachment = request.messages.slice(index + 1).flatMap(message =>
+            Array.isArray(message.content) ? message.content : []).find(part => part.type === 'image_url');
+        }
+      } else if (prompt.includes('SHARE-GENERATED-PNG')) {
+        if (!after.length) {
+          tool = 'request_image_artifact';
+        } else if (after.length === 1 && typeof operationResult === 'string') {
+          const { artifactId } = JSON.parse(operationResult);
+          tool = 'post_message'; args = { roomId: 'team', body: 'Generated fixture PNG', attachments: [{ artifactId }] };
+        }
+      }
+      if (operation && typeof operationResult === 'string' && (browser !== 'BUILDER-BROWSER' || !operationOutput.has(operation))) {
+        operationOutput.set(operation, operationResult);
+      }
       if (!after.length && edit) {
         tool = 'create';
         args = {
@@ -432,14 +512,18 @@ test('the real SDK and MCP relay notifications and restore previously published 
   }), () => {}, message => console.error(message), undefined, async (role, operation) => {
     workspaceOperations.push(`${role.id}:${operation.kind}`);
     return true;
-  });
-  const waitUntil = async (check: () => boolean, message: string) => {
+  }, async role => role.id === 'lead' ? generatedPng : undefined);
+  const waitUntil = async (check: () => boolean | Promise<boolean>, message: string) => {
     const end = Date.now() + 5000;
-    while (!check() && Date.now() < end) await delay(20);
-    assert(check(), message);
+    do {
+      if (await check()) return;
+      await delay(20);
+    } while (Date.now() < end);
+    assert.fail(message);
   };
   const definitions = (prompt: string, overrides: Record<string, RoleDefinition['permissions']> = {}) => defaultRoles.map(role => ({
-    ...role, ...(role.id === 'builder' ? { prompt } : {}), permissions: { ...role.permissions, ...overrides[role.id] },
+    ...role, ...(role.id === 'lead' ? { name: 'Release Coordinator' } : {}),
+    ...(role.id === 'builder' ? { prompt } : {}), permissions: { ...role.permissions, ...overrides[role.id] },
   }));
   const connect = async (host: Awaited<ReturnType<Team['openNativeHost']>>) => {
     const url = new URL(host.url);
@@ -503,9 +587,13 @@ test('the real SDK and MCP relay notifications and restore previously published 
     let resource: string;
     let chat: string;
     const activity = (id: string) => team.roster().find(role => role.id === id)?.activity;
+    const announcements = () => store.transcript('team').filter(message => message.author === 'Agent Teams');
+    assert.deepEqual(announcements().map(message => message.recipients.map(({ name }) => name)), [[], ['Release Coordinator']]);
+    await waitUntil(() => store.isAcknowledged(lead, announcements()[1].id), 'the existing peer should acknowledge the new assignment');
     try {
-      const { items } = await nativeRequest('listSessions', { channel }) as { items: { resource: string; provider: string }[] };
-      assert.deepEqual(items.map(item => [new URL(item.resource).pathname, item.provider]), [[`/${lead}`, 'copilot']]);
+      const { items } = await nativeRequest('listSessions', { channel }) as { items: { resource: string; provider: string; title: string }[] };
+      assert.deepEqual(items.map(item => [new URL(item.resource).pathname, item.provider, item.title]),
+        [[`/${lead}`, 'copilot', 'Release Coordinator']]);
       resource = items[0].resource;
       const { snapshot } = await nativeRequest('subscribe', { channel: resource }) as { snapshot: { state: { defaultChat?: string } } };
       assert(snapshot.state.defaultChat);
@@ -516,6 +604,8 @@ test('the real SDK and MCP relay notifications and restore previously published 
       assert.equal(createSession.mock.callCount(), 2);
       await waitUntil(() => activity('lead') === 'Idle', 'Lead should finish its greeting before native input');
       await sendNative(native, chat, 'NATIVE-BEFORE-RESTART');
+      const current = await nativeRequest('listSessions', { channel }) as { items: { title: string }[] };
+      assert.equal(current.items[0].title, 'Release Coordinator');
     } finally {
       socket.close();
     }
@@ -550,10 +640,38 @@ test('the real SDK and MCP relay notifications and restore previously published 
     await waitUntil(() => store.isAcknowledged(lead, continuation.id) && activity('lead') === 'Idle',
       'Lead should read the thread continuation through MCP and acknowledge the inbox delivery');
     assert(continuedThread);
+    const quietImage = store.post('team', 'You', '', [], false, undefined, undefined, [], [imageBytes]);
+    imageSourceId = quietImage.id;
+    imageOtherRoom = store.createRoom('Other image room', 'quick', ['lead']);
+    assert.deepEqual(quietImage.sessions, []);
+    assert.deepEqual(quietImage.wakeSessions, []);
+    const imagePost = team.postHuman('team', 'Check image delivery', ['lead']);
+    await waitUntil(() => store.isAcknowledged(lead, imagePost.id) && activity('lead') === 'Idle',
+      'Lead should request an image through MCP and acknowledge the delivery');
+    assert.equal(modelImageResult?.image_url.url, `data:image/png;base64,${imageBytes.toString('base64')}`);
+    assert.equal(store.acknowledge(lead, quietImage.id), false);
+    const repost = JSON.parse(imagePostResults[0]);
+    assert.equal(repost.recipients, 0);
+    assert.equal(repost.wakeScheduled, 0);
+    const imageOnly = store.transcript('team').find(message => message.id === repost.id);
+    assert.equal(imageOnly?.author, 'Release Coordinator');
+    assert.equal(imageOnly?.body, '');
+    assert.deepEqual(store.readWorkerAttachment(builder, 'team', repost.id, 0), imageBytes);
+    assert.match(imagePostResults[1], /unavailable/);
+    assert.deepEqual(store.transcript(imageOtherRoom), []);
+    const imageReply = JSON.parse(imagePostResults[2]);
+    assert.equal(imageReply.recipients, 1);
+    assert.equal(imageReply.wakeScheduled, 1);
+    assert.equal(store.transcript('team').find(message => message.id === imageReply.id)?.replyTo?.id, imagePost.id);
+    assert.deepEqual(store.readAttachment('team', imageReply.id, 0), imageBytes);
 
     await team.start('reviewer');
     const reviewer = store.role('reviewer').sessionId!;
     await waitUntil(() => activity('reviewer') === 'Idle', 'Reviewer should finish the greeting before the delegation');
+    const reviewerAnnouncement = announcements()[2];
+    assert(reviewerAnnouncement);
+    await waitUntil(() => [lead, builder].every(id => store.isAcknowledged(id, reviewerAnnouncement.id)),
+      'both existing peers should acknowledge the new reviewer');
     const delegation = await connect(nativeHost);
     try {
       await delegation.request('subscribe', { channel: resource });
@@ -574,6 +692,11 @@ test('the real SDK and MCP relay notifications and restore previously published 
     assert.throws(() => postTeamFromChat(team, { ...request, roleId: 'builder' }), /paused/i);
     const next = team.postHuman('team', 'Preserve this across restart', ['builder']);
     assert.equal(store.role('builder').paused, 1);
+    const originalLead = await createSession.mock.calls[0].result;
+    assert(originalLead);
+    const legacyTitle = 'Read your role and project context';
+    assert.equal((await originalLead.rpc.name.setAuto({ summary: legacyTitle })).applied, true);
+    assert.equal((await originalLead.rpc.name.get()).name, legacyTitle);
     await team.close();
     store.close();
     repositoryReadAccess = true;
@@ -592,6 +715,7 @@ test('the real SDK and MCP relay notifications and restore previously published 
     const recoveredHost = await team.openNativeHost();
     await team.restore(() => Promise.resolve(recoveredHost));
     assert.equal(team.needsRestore, false, 'successful restore should return the action to the roster');
+    assert.equal(announcements().length, 3, 'restore must not announce existing assignments again');
     assert.equal(activity('builder'), 'Paused');
     assert.equal(store.isAcknowledged(builder, next.id), false);
     const recovered = await connect(recoveredHost);
@@ -602,14 +726,28 @@ test('the real SDK and MCP relay notifications and restore previously published 
       };
       const listed = await list();
       assert.deepEqual([...listed.keys()].sort(), [`/${lead}`, `/${builder}`].sort(), 'the host lists only opted-in chats');
+      const titleOfLead = async () => {
+        const { items } = await recovered.request('listSessions', { channel }) as { items: { resource: string; title: string }[] };
+        return items.find(item => new URL(item.resource).pathname === `/${lead}`)?.title;
+      };
+      assert.equal(await titleOfLead(), 'Release Coordinator');
       await assert.rejects(recovered.request('subscribe', { channel: listed.get(`/${builder}`) }), /materialization failed/, 'a native subscription cannot restart a paused worker');
       assert.equal(activity('builder'), 'Paused');
-      const { snapshot: session } = await recovered.request('subscribe', { channel: resource }) as { snapshot: { state: { defaultChat: string } } };
+      const { snapshot: session } = await recovered.request('subscribe', { channel: resource }) as {
+        snapshot: { state: { defaultChat: string; title: string } };
+      };
       assert.equal(session.state.defaultChat, chat);
+      assert.equal(session.state.title, 'Release Coordinator');
       const { snapshot: restored } = await recovered.request('subscribe', { channel: chat }) as ChatSnapshot;
       assert(!['read-only', 'hidden'].includes(restored.state.interactivity ?? ''));
       assert(restored.state.turns.some(turn => turn.message.text === 'NATIVE-BEFORE-RESTART'));
       await sendNative(recovered, chat, 'NATIVE-AFTER-RESTART');
+      assert.equal(await titleOfLead(), 'Release Coordinator');
+      recovered.dispatch(resource, { type: 'session/titleChanged', title: 'Release checklist' });
+      await waitUntil(async () => await titleOfLead() === 'Release checklist', 'the native rename should reach the session list');
+      await team.startInNativeChat('lead');
+      await team.restoreNativeChat(() => Promise.resolve(recoveredHost));
+      assert.equal(await titleOfLead(), 'Release checklist', 'role title refresh should preserve a manual rename');
       assert(sawRepositoryContents, `the restored worker should be able to list and read workspace docs: ${JSON.stringify(repositoryTrace)}`);
       await team.start('builder');
       await team.restoreNativeChat(() => Promise.resolve(recoveredHost), 'builder');
@@ -638,12 +776,13 @@ test('the real SDK and MCP relay notifications and restore previously published 
             advertised ||= action?.type === 'session/activeClientSet' && action.activeClient.clientId === observer.clientId;
             const request = action?.type === 'session/inputNeededSet' && action.request;
             const name = request?.toolCall?.toolName;
-            if (request?.kind === 'toolClientExecution' && (name === 'openBrowserPage' || name === 'problems')) {
+            if (request?.kind === 'toolClientExecution' && (name === 'openBrowserPage' || name === 'problems' || name === 'screenshotPage')) {
               if (name === 'openBrowserPage') browserInputs.push(request.toolCall.toolInput);
               const text = name === 'problems' ? 'EDITOR DIAGNOSTICS RESULT' : 'NATIVE BROWSER RESULT';
               observer.dispatch(request.chat, {
                 type: 'chat/toolCallComplete', turnId: request.turnId, toolCallId: request.toolCall.toolCallId,
-                result: { success: true, pastTenseMessage: 'Completed fixture', content: [{ type: 'text', text }] },
+                result: { success: true, pastTenseMessage: 'Completed fixture', content: name === 'screenshotPage'
+                  ? [{ type: 'embeddedResource', contentType: 'image/jpeg', data: screenshotJpeg }] : [{ type: 'text', text }] },
               });
             }
           });
@@ -680,7 +819,18 @@ test('the real SDK and MCP relay notifications and restore previously published 
     assert(!toolCatalog.get('LEAD-BROWSER')?.some(name => browserTools.includes(name)));
     await runForRole('builder', 'BUILDER-BROWSER');
     assert(!toolCatalog.get('BUILDER-BROWSER')?.some(name => browserTools.includes(name)), 'without an advertising editor there are no browser tools');
-    await runForRole('builder', 'BUILDER-BROWSER', 'native');
+    const screenshotTurn = await runForRole('builder', 'BUILDER-BROWSER', 'native');
+    const screenshotPost = store.transcript('team').find(message => message.body === 'Captured fixture screenshot');
+    assert(screenshotPost, `Builder should receive an artifact ID and post: ${JSON.stringify(screenshotTrace)?.slice(0, 1000)} ${JSON.stringify(screenshotTurn.turns.at(-1))?.slice(0, 1800)}`);
+    screenshotMessageId = screenshotPost.id;
+    assert.deepEqual(store.readAttachment('team', screenshotMessageId, 0), expectedScreenshot);
+    await runForRole('lead', 'VERIFY-SCREENSHOT');
+    assert.match(foreignArtifactResult ?? '', /unavailable for this worker/);
+    assert.equal(screenshotAttachment?.image_url.url, `data:image/png;base64,${expectedScreenshot.toString('base64')}`);
+    await runForRole('lead', 'SHARE-GENERATED-PNG');
+    const generatedPost = store.transcript('team').find(message => message.body === 'Generated fixture PNG');
+    assert(generatedPost, 'Lead should post the PNG selected through the picker');
+    assert.deepEqual(store.readWorkerAttachment(builder, 'team', generatedPost.id, 0), imageBytes);
     await runForRole('reviewer', 'REVIEWER-BROWSER', 'inbox');
     for (const role of ['BUILDER', 'REVIEWER']) {
       assert.match(operationOutput.get(`${role}-BROWSER`) ?? '', /NATIVE BROWSER RESULT/,

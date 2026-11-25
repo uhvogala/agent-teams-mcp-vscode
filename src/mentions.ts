@@ -1,3 +1,6 @@
+export const roleMentionPattern = /(?<![^\s([{])@([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?![\w@/-]|\.[\w])/gi;
+export const isExcludedMentionLine = (line: string) => /^(?: {4}|\t|\s*>)/.test(line);
+
 export function mentionedRoles(body: string, members: readonly string[]) {
   const targets = new Set<string>();
   let fence: string | undefined;
@@ -8,9 +11,9 @@ export function mentionedRoles(body: string, members: readonly string[]) {
       continue;
     }
     if (marker) { fence = marker; continue; }
-    if (/^(?: {4}|\t|\s*>)/.test(line)) continue;
+    if (isExcludedMentionLine(line)) continue;
     const prose = line.replace(/(`+).*?\1/g, '');
-    for (const [, mention] of prose.matchAll(/(?:^|[\s([{])@([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?![\w@/-]|\.[\w])/gi)) {
+    for (const [, mention] of prose.matchAll(roleMentionPattern)) {
       const id = mention.toLowerCase();
       if (id === 'all') return [...members];
       if (members.includes(id)) targets.add(id);

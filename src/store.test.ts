@@ -2,9 +2,64 @@ import { strict as assert } from 'node:assert';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { TeamStore } from './store';
 import { defaultTeamConfig, loadTeamConfig, resolveRoleLaunch } from './team-config';
+
+test('assignment announcements roll back atomically and deliver to existing peers exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-teams-announcement-'));
+  const path = join(dir, 'team.sqlite');
+  let store: TeamStore | undefined;
+  let sql: DatabaseSync | undefined;
+  try {
+    store = new TeamStore(path);
+    sql = new DatabaseSync(path);
+    const lead = store.reserve('lead');
+    const builder = store.reserve('builder');
+    store.assign('lead', lead);
+    store.assign('builder', builder);
+    store.pause(builder, true);
+    const reviewer = 'reviewer-session';
+    sql.exec(`CREATE TRIGGER reject_join BEFORE INSERT ON messages
+      BEGIN SELECT RAISE(ABORT, 'fixture announcement failure'); END;`);
+    const reserved = store.reserve('reviewer', reviewer);
+    assert.throws(() => store!.assignAndAnnounce('reviewer', reserved), /fixture announcement failure/);
+    assert.equal(store.role('reviewer').phase, 'reserved');
+    store.release('reviewer', reserved);
+    assert.throws(() => store!.assignAndAnnounce('reviewer', reviewer, true), /fixture announcement failure/);
+    assert.equal(store.role('reviewer').sessionId, null);
+    assert.deepEqual(store.transcript('team'), []);
+    sql.exec('DROP TRIGGER reject_join');
+
+    const joined = store.assignAndAnnounce('reviewer', reviewer, true);
+    assert.deepEqual(joined.wakeSessions, [lead]);
+    assert.equal(joined.wakeLimited, false);
+    assert.throws(() => store!.assignAndAnnounce('reviewer', reviewer), /saved reservation/);
+    store.close();
+    store = undefined;
+    store = new TeamStore(path);
+    const messages = store.transcript('team');
+    assert.deepEqual(messages.map(({ id }) => id), [joined.id]);
+    assert.equal(messages[0].author, 'Agent Teams');
+    assert.match(messages[0].body, /^Reviewer \(reviewer\) joined the team\. Responsibility: Review proposals/);
+    assert.deepEqual(messages[0].recipients.map(({ name, state }) => [name, state]),
+      [['Builder', 'inbox-only'], ['Lead', 'queued']]);
+    assert.equal(store.unread(builder), 1);
+    store.pause(builder, false);
+    assert.deepEqual(store.claimWake(builder), [], 'a paused peer was not queued for a later automatic wake');
+    assert.equal(store.unread(reviewer), 0);
+
+    store.release('reviewer', reviewer);
+    const replacement = store.reserve('reviewer');
+    store.assignAndAnnounce('reviewer', replacement);
+    assert.equal(store.transcript('team').length, 2, 'a replacement is a genuine new assignment');
+  } finally {
+    sql?.close();
+    store?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('workspace definitions replace vacant defaults and preserve state for stable role IDs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-teams-config-'));
@@ -463,6 +518,9 @@ test('a shared wake chain exhausts its budget across branches and restarts witho
     assert.deepEqual(store.transcript('team').find(message => message.id === reply.id)?.recipients.map(({ state }) => state),
       ['queued', 'wake-limited']);
     store.close();
+    const legacy = new DatabaseSync(file);
+    try { legacy.exec('ALTER TABLE delivery DROP COLUMN wakeLimited'); }
+    finally { legacy.close(); }
     store = new TeamStore(file);
     const restored = store.transcript('team');
     const restoredReply = restored.find(message => message.id === reply.id);
